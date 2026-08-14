@@ -75,10 +75,31 @@ class FastTD3Config:
 
     actor_lr: float = 3.0e-4
     critic_lr: float = 3.0e-4
-    batch_size: int = 32768
-    #: Gradient steps per environment step. The paper's "2 to 8 updates per 128 to 4096
-    #: parallel environment steps".
-    num_updates: int = 2
+    #: 8,192, not the authors' 32,768, and the reason is our chip. Measured by
+    #: scripts/bench_fasttd3.py on this M3 Max:
+    #:
+    #:     batch     ms/update   us/sample   end-to-end env steps/s
+    #:      4,096        19.9       4.86            46,083
+    #:      8,192        36.9       4.51            33,321
+    #:     32,768       147.0       4.48            11,941
+    #:     65,536       342.7       5.23             5,577
+    #:
+    #: The us/sample column is FLAT. MPS is already saturated at 4,096, so cost scales
+    #: linearly with batch and a large batch buys nothing back. On an A100 that column falls
+    #: steeply, which is exactly why the authors can afford 32,768; the number does not
+    #: transfer across that difference in hardware. Copying it unchecked is the same mistake
+    #: that gave this project an 8-second episode.
+    #:
+    #: What IS fixed is the replay ratio (samples processed per environment step). At ratio
+    #: 16 every split costs the same wall clock, so batch size becomes a free choice about
+    #: gradient quality: 8,192 x 8 updates and 32,768 x 2 both take ~344 ms per iteration,
+    #: but the former takes four times as many optimiser steps. 8K is also exactly the
+    #: ceiling the 15-minute paper reports as "consistently improving performance".
+    batch_size: int = 8192
+    #: Gradient steps per environment step, giving a replay ratio of 8192*8/4096 = 16
+    #: samples per environment step. PPO on this project runs at 5. The paper's range is
+    #: "2 to 8 updates per 128 to 4096 parallel environment steps".
+    num_updates: int = 8
     #: Delayed policy updates, the second D in TD3.
     policy_frequency: int = 2
 

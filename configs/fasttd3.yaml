@@ -2,7 +2,7 @@ run:
   name: fasttd3
   seed: 0
   device: auto
-  total_env_steps: 100000000
+  total_env_steps: 50000000
   output_dir: runs
   algo: fasttd3
 env:
@@ -132,8 +132,8 @@ fasttd3:
   num_atoms: 401
   gamma: 0.99
   tau: 0.1
-  batch_size: 32768
-  num_updates: 2
+  batch_size: 8192
+  num_updates: 8
   policy_frequency: 2
   buffer_size_per_env: 1024
   learning_starts: 10
