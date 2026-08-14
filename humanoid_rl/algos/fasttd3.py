@@ -301,6 +301,14 @@ class FastTD3:
             cfg.std_min, cfg.std_max
         )
         self.updates = 0
+        #: Last actor-update statistics, carried forward between updates.
+        #:
+        #: TD3 delays the actor, so q_value and actor_loss exist only on every second
+        #: update. At num_updates=1 that interacts with the logging cadence to make them
+        #: NEVER appear: updates at iteration N is N minus learning_starts, logging happens
+        #: on even N, and the parity works out odd every time. A metric that is structurally
+        #: invisible looks exactly like a metric that is broken, so carry the last value.
+        self._last_actor: dict[str, float] = {}
 
     @torch.no_grad()
     def act(self, obs: torch.Tensor, explore: bool = True) -> torch.Tensor:
@@ -340,7 +348,7 @@ class FastTD3:
         critic_loss.backward()
         self.critic_opt.step()
 
-        metrics = {"critic_loss": float(critic_loss.detach())}
+        metrics = {"critic_loss": float(critic_loss.detach()), **self._last_actor}
         self.updates += 1
 
         if self.updates % cfg.policy_frequency == 0:
@@ -349,8 +357,9 @@ class FastTD3:
             self.actor_opt.zero_grad(set_to_none=True)
             actor_loss.backward()
             self.actor_opt.step()
-            metrics["actor_loss"] = float(actor_loss.detach())
-            metrics["q_value"] = float(q1_pred.mean().detach())
+            self._last_actor = {"actor_loss": float(actor_loss.detach()),
+                                "q_value": float(q1_pred.mean().detach())}
+            metrics.update(self._last_actor)
             self._soft_update()
         return metrics
 
