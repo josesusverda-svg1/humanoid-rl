@@ -39,6 +39,10 @@ class RunConfig:
     #: "tracking" reproduces reference mocap frame by frame (Phase 3 Stage 1),
     #: "amp" follows velocity commands with an adversarial motion prior (Stage 2).
     task: str = "locomotion"
+    #: Learning algorithm. "ppo" is the shipped path; "fasttd3" selects the off-policy
+    #: trainer. They share the environment, reward, observations and humanoid model
+    #: entirely, and differ only in what consumes the transitions.
+    algo: str = "ppo"
     total_env_steps: int = 500_000_000
     output_dir: str = "runs"
 
@@ -103,6 +107,9 @@ class LogConfig:
     log_interval_iterations: int = 1
 
 
+from humanoid_rl.algos.fasttd3 import FastTD3Config  # noqa: E402
+
+
 @dataclass
 class Config:
     run: RunConfig = field(default_factory=RunConfig)
@@ -113,6 +120,9 @@ class Config:
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     amp: AMPConfig = field(default_factory=AMPConfig)
     amp_task: AMPLocomotionConfig = field(default_factory=AMPLocomotionConfig)
+    #: Off-policy alternative to `ppo`, selected by run.algo = "fasttd3". Ignored otherwise,
+    #: so a PPO run carries these defaults harmlessly and the two paths never interfere.
+    fasttd3: FastTD3Config = field(default_factory=FastTD3Config)
     #: Directory of retargeted clips, and a filter over their names.
     clip_dir: str = "data/clips"
     clip_include: tuple[str, ...] = ("FW", "BW", "SW", "TR1", "ID")

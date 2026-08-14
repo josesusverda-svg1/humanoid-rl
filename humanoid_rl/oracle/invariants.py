@@ -528,6 +528,60 @@ def check_checkpoint(path: Path, config) -> list[Finding]:
                     f"log_std max {float(log_std.max()):+.4f} is below the clamp {ceiling:+.2f}")]
 
 
+@check
+def value_support_covers_reachable_return(config) -> list[Finding]:
+    """A distributional critic's grid must reach the returns the reward function can pay.
+
+    This is the quietest catastrophic failure available in the whole method. C51 puts
+    probability mass on a FIXED grid from v_min to v_max. If the reachable discounted return
+    exceeds v_max, every good state piles its mass on the top atom, the critic returns the
+    same number for "walking beautifully" and "barely upright", and the actor gets no
+    gradient distinguishing them. The critic loss goes down the whole time, because
+    predicting a saturated target is easy. Nothing anywhere looks wrong.
+
+    The two sides are specified independently, which is what makes the check worth having:
+    v_max is a number in the FastTD3 config, and the reachable return falls out of the task's
+    reward weights and gamma. The FastTD3 authors' own IsaacLab preset is +/-10, correct for
+    IsaacLab's tiny rewards and off by a factor of 30 for ours.
+    """
+    if getattr(config.run, "algo", "ppo") != "fasttd3":
+        return []
+    td3 = config.fasttd3
+    task = config.task
+    # Upper bound on per-step reward: every positive term at full value, penalties ignored.
+    # Deliberately optimistic, because the support has to cover the best case, not the mean.
+    positive = sum(max(getattr(task, name, 0.0), 0.0) for name in dir(task)
+                   if name.startswith("w_"))
+    ceiling = positive / max(1.0 - td3.gamma, 1e-9)
+
+    out: list[Finding] = []
+    if td3.v_max < ceiling:
+        out.append(Finding(
+            Severity.CONTRADICTION, "value support",
+            f"v_max is {td3.v_max:.0f} but the reward weights allow a discounted return of "
+            f"{ceiling:.0f} at gamma={td3.gamma}. Returns above v_max saturate on the top "
+            f"atom, so the critic cannot rank good states against each other.",
+            remedy=f"Set v_max to at least {ceiling * 1.25:.0f}, or use "
+                   f"humanoid_rl.algos.fasttd3.suggested_support().",
+            caught_before="Not yet. This check exists because the failure is invisible: the "
+                          "critic loss falls normally while the value function is constant.",
+        ))
+    # Resolution matters too: too few atoms over too wide a range and neighbouring returns
+    # land on the same atom, which is the same blindness by a different route.
+    width = (td3.v_max - td3.v_min) / max(td3.num_atoms - 1, 1)
+    if width > 0.5 * positive:
+        out.append(Finding(
+            Severity.SUSPECT, "value resolution",
+            f"each atom spans {width:.2f} of return, more than half a single step's best "
+            f"reward ({positive:.2f}). One step of improvement may not move the target.",
+            remedy=f"Raise num_atoms above {int((td3.v_max - td3.v_min) / (0.5 * positive))}.",
+        ))
+    return out or [Finding(
+        Severity.OK, "value support",
+        f"[{td3.v_min:.0f}, {td3.v_max:.0f}] over {td3.num_atoms} atoms covers a reachable "
+        f"{ceiling:.0f}")]
+
+
 def run_all(config, checkpoint: Path | None = None) -> list[Finding]:
     """Every invariant. Failures inside a check are reported, never raised."""
     findings: list[Finding] = []
