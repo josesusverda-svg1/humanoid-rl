@@ -1,0 +1,91 @@
+{
+  "hardware": {
+    "chip": "Apple M3 Max",
+    "p_cores": 10
+  },
+  "workers": 10,
+  "control_steps": 150,
+  "results": [
+    {
+      "variant": "A threads-4call",
+      "workers": 10,
+      "n_envs": 256,
+      "env_steps_per_sec": 31209.94198364672,
+      "elapsed_s": 1.2303771669976413,
+      "gil_handoffs_per_env_step": "4",
+      "notes": "per-env Python obs loop"
+    },
+    {
+      "variant": "B threads-nstep",
+      "workers": 10,
+      "n_envs": 256,
+      "env_steps_per_sec": 77528.15732218625,
+      "elapsed_s": 0.4953039170068223,
+      "gil_handoffs_per_env_step": "1",
+      "notes": "per-env Python obs loop"
+    },
+    {
+      "variant": "C rollout-batched",
+      "workers": 10,
+      "n_envs": 256,
+      "env_steps_per_sec": 78861.03990107303,
+      "elapsed_s": 0.48693245800677687,
+      "gil_handoffs_per_env_step": "1/256",
+      "notes": "native pool + vectorised numpy obs"
+    },
+    {
+      "variant": "A threads-4call",
+      "workers": 10,
+      "n_envs": 1024,
+      "env_steps_per_sec": 32515.069178663754,
+      "elapsed_s": 4.723963500000536,
+      "gil_handoffs_per_env_step": "4",
+      "notes": "per-env Python obs loop"
+    },
+    {
+      "variant": "B threads-nstep",
+      "workers": 10,
+      "n_envs": 1024,
+      "env_steps_per_sec": 72407.01936032207,
+      "elapsed_s": 2.1213412920042174,
+      "gil_handoffs_per_env_step": "1",
+      "notes": "per-env Python obs loop"
+    },
+    {
+      "variant": "C rollout-batched",
+      "workers": 10,
+      "n_envs": 1024,
+      "env_steps_per_sec": 76887.77377498984,
+      "elapsed_s": 1.9977168340119533,
+      "gil_handoffs_per_env_step": "1/1024",
+      "notes": "native pool + vectorised numpy obs"
+    },
+    {
+      "variant": "A threads-4call",
+      "workers": 10,
+      "n_envs": 4096,
+      "env_steps_per_sec": 27594.051043270058,
+      "elapsed_s": 22.26566874999844,
+      "gil_handoffs_per_env_step": "4",
+      "notes": "per-env Python obs loop"
+    },
+    {
+      "variant": "B threads-nstep",
+      "workers": 10,
+      "n_envs": 4096,
+      "env_steps_per_sec": 80486.76193854926,
+      "elapsed_s": 7.633553459003451,
+      "gil_handoffs_per_env_step": "1",
+      "notes": "per-env Python obs loop"
+    },
+    {
+      "variant": "C rollout-batched",
+      "workers": 10,
+      "n_envs": 4096,
+      "env_steps_per_sec": 78476.92058942506,
+      "elapsed_s": 7.8290533749968745,
+      "gil_handoffs_per_env_step": "1/4096",
+      "notes": "native pool + vectorised numpy obs"
+    }
+  ]
+}

@@ -1,0 +1,101 @@
+# Motion-imitation algorithms for RL humanoid locomotion (DeepMimic/AMP/ASE/CALM/PULSE/PHC/ProtoMotions/MaskedMimic + 2024-26 successors) and their viability on M3 Max / macOS 26.5 / no CUDA
+
+| field | value |
+|---|---|
+| apple_silicon_status | usable |
+| current_version | MimicKit: no tagged releases (rolling main, last push 2026-06-23). Supporting stack: mujoco 3.11.0, torch 2.13.0, newton 1.5.0, warp-lang 1.16.0, ProtoMotions rolling main (2026-08-11) |
+| last_release_date | 2026-06-23 |
+| maintenance_status | MimicKit actively maintained (push 2026-06-23, 2224 stars, 194 commits). ProtoMotions very active (2026-08-11, 2290 stars). MuJoCo very active (2026-08-12). rsl_rl active (2026-07-20). whole_body_tracking active (2026-07-24). GMR active (2026-04-02, feature news through 2026-01). ASE slow (2025-12-07). PHC slow (2025-08-21). HumanoidVerse slow (2025-06-12). legged_gym slow (2025-05-29). PULSE near-dead (2025-02-08). CALM abandoned — last push 2023-07-16, ~3 years stale. Isaac Gym itself is officially dead: NVIDIA labels it "legacy software... no longer supported". |
+| license | MimicKit Apache-2.0; ProtoMotions Apache-2.0; DeepMimic MIT; GMR MIT; whole_body_tracking (BeyondMimic) MIT; ASAP MIT; HumanoidVerse MIT; mjlab Apache-2.0; ASE/CALM/PHC non-standard "NOASSERTION" (NVIDIA source-available / research-only — check before use); PULSE has NO license file at all (legally unusable as-is) |
+| confidence | high |
+| install | `uv venv --python 3.12 && uv pip install "mujoco==3.11.0" "torch==2.13.0" numpy pyyaml tensorboardX gymnasium moviepy   # then: git clone https://github.com/xbpeng/MimicKit (Apache-2.0) and reuse mimickit/learning/* + mimickit/anim/* ; do NOT install newton/warp/mujoco-warp — see blockers` |
+
+## Summary
+
+The algorithms you want are portable; the simulators they ship with are not. Every major motion-imitation codebase (ASE, CALM, PULSE, PHC/PHC+, MaskedMimic, ProtoMotions, ASAP, HumanoidVerse, BeyondMimic, mjlab) requires Isaac Gym, Isaac Lab, or MuJoCo-Warp for training, and all three are CUDA/NVIDIA-only. On this Mac they are disqualified for training, full stop. The one genuinely reusable asset is MimicKit (Xue Bin Peng, Apache-2.0, last push 2026-06-23), whose learning code — AMP, DeepMimic, ASE, ADD, SMP, LCP, PPO — is plain device-agnostic PyTorch with a 10-line requirements.txt and no CUDA imports, sitting behind a clean ~40-method `Engine` abstract base class, and whose character asset is already an MJCF XML that MuJoCo loads natively. I verified on this exact machine that MimicKit's Newton backend does run on macOS arm64 CPU (64 humanoid envs, physics correct) but only under an exact 4-way pin (newton==1.0.0, mujoco==3.5.0, mujoco-warp==3.5.0.2, warp-lang==1.12.0), and it delivers ~600 control-steps/s — roughly 200x too slow to train, because Warp's CPU path is single-threaded scalar code. Plain MuJoCo 3.11 with `mujoco.rollout` threading hits 118,807 control-steps/s on the same 34-DoF humanoid, and torch MPS runs the AMP-sized MLP 3.2x faster than CPU. The recommendation is therefore: take MimicKit's algorithm code as-is, throw away all three of its engines, and write one `mujoco_engine.py` against its existing Engine ABC.
+
+## Key facts
+
+- MimicKit (github.com/xbpeng/MimicKit, Apache-2.0, last push 2026-06-23, 2224 stars) implements DeepMimic, AMP, ASE, AWR, LCP, ADD and SMP in one lightweight codebase. Companion paper arXiv:2510.13794 (v1 2025-10-15, v4 2026-01-18).
+- MimicKit's entire requirements.txt is: gymnasium, diffusers, moviepy, matplotlib, numpy, pyyaml, pyglet, tensorboardX, torch>=1.9.1, wandb. No CUDA package, no simulator, no pinned CUDA torch. The learning code is device-parametric via a single `self._device` string.
+- MimicKit's humanoid asset data/assets/humanoid/humanoid.xml is MJCF (136 lines, nq=35 nv=34 nu=28 nbody=16) — MuJoCo loads it directly with zero conversion. I confirmed this by loading it on this machine.
+- MimicKit isolates all simulator coupling behind mimickit/engines/engine.py — an abstract base class of ~40 small methods (get_root_pos, get_dof_vel, get_body_rot, set_dof_pos, get_contact_forces, step, ...). Writing a MuJoCo backend means implementing this one file; nothing in learning/ or anim/ changes.
+- VERIFIED ON THIS MACHINE: MimicKit's Newton engine DOES construct and step 64 humanoid envs on macOS 26.5 arm64 CPU — but only under the exact pin newton==1.0.0 + mujoco==3.5.0 + mujoco-warp==3.5.0.2 + warp-lang==1.12.0. Four other version combinations each failed at a different layer.
+- VERIFIED: none of those failures were CUDA-related. Warp initializes on macOS as CPU-only ('CUDA not enabled in this build', device 'cpu':'arm'), MJCF parses, the model finalizes on the CPU device, and CUDA graph capture is correctly guarded behind `if wp.get_device().is_cuda`. The blockers are pure version skew.
+- Isaac Gym is officially deprecated: developer.nvidia.com/isaac-gym states 'This is legacy software. Developers may download and continue to use it, but it is no longer supported.' It is also Linux-x86_64 + NVIDIA-only. ASE, CALM, PULSE, PHC, ASAP and HumanoidVerse all depend on it.
+- ProtoMotions (NVlabs, Apache-2.0, push 2026-08-11) implements AMP, ASE, ADD, MaskedMimic, GPC/PEFT, and mimic variants including an FSQ-quantized latent (examples/experiments/mimic/fsq.py) and a BeyondMimic-style L2C2 variant. It has a MuJoCo backend — but requirements_mujoco.txt states plainly it is for 'Run inference', is 'CPU-only and single-environment only' (num_envs must be 1). It cannot train on this Mac.
+- mjlab (Apache-2.0, push 2026-08-12, MuJoCo-Warp based) README says verbatim: 'mjlab requires an NVIDIA GPU for training. macOS is supported for evaluation only.' Its PyPI classifier is 'Environment :: GPU :: NVIDIA CUDA'. Disqualified for training.
+- The official AMP reference implementation CONTRADICTS the AMP paper on two central points. Paper (arXiv:2104.02180) specifies an LSGAN least-squares objective with targets +1/-1, gradient penalty w_gp=10, and style reward r = max(0, 1 - 0.25(D-1)^2). The released code in nv-tlabs/ASE/ase/learning/amp_agent.py uses BCEWithLogitsLoss with 0/1 targets and reward r = -log(max(1-sigmoid(D), 1e-4)) scaled by disc_reward_scale. MimicKit reproduces the CODE version, not the paper version. Implement from the code, not the paper.
+- Official AMP humanoid hyperparameters (nv-tlabs/ASE amp_humanoid.yaml) match MimicKit's amp_humanoid_agent.yaml exactly: disc_logit_reg 0.01, disc_grad_penalty 5, disc_reward_scale 2, replay buffer 200000, task_reward_w 0.0, disc_reward_w 1.0. amp_replay_keep_prob 0.01 in ASE; disc_replay_samples 1000 in MimicKit.
+- AMP discriminator observation (per paper): root linear+angular velocity in character-local frame, local rotation of each joint, local velocity of each joint, and 3D end-effector positions in local frame. MimicKit's amp_humanoid_env.yaml sets num_disc_obs_steps: 10 — the discriminator sees a 10-frame window, not a single (s,s') pair.
+- MimicKit's AMP config sets use_mixed_precision: false, which conveniently sidesteps the bfloat16-autocast-on-MPS question in _update_disc's torch.amp.autocast call.
+- GMR (github.com/YanjieZe/GMR, MIT, push 2026-04-02, 2589 stars) is the current standard motion-retargeting tool and MimicKit ships a direct converter at tools/gmr_to_mimickit/. GMR's own changelog notes MimicKit format support added 2025-11-08. MimicKit also ships tools/smpl_to_mimickit/ for AMASS.
+- ADD (Adversarial Differential Discriminator, arXiv:2505.04961, SIGGRAPH Asia 2025) is the notable recent successor: it removes manual reward weight tuning, needs only a single positive sample, matches DeepMimic on tracking, and succeeds on parkour motions where hand-tuned DeepMimic fails. It is implemented in BOTH MimicKit (learning/add_agent.py) and ProtoMotions.
+- jax-metal is effectively dead — last release 0.1.1 on 2024-10-08, nearly two years stale. MJX-on-Metal is not a viable path; MJX on this machine would fall back to CPU JAX.
+
+## Reusable for this project
+
+- mimickit/learning/amp_agent.py — complete AMP implementation, pure PyTorch, device-agnostic. Already contains all three standard stability fixes: gradient penalty (_compute_disc_disc_loss applies disc_grad_penalty to BOTH demo and agent grads, unlike ASE which penalizes demo only), a policy-state replay buffer (_disc_buffer / _store_disc_replay_data, size 200000, 1000 samples/iter), and logit L2 regularization (disc_logit_reg). Drop-in reusable.
+- mimickit/learning/ppo_agent.py + base_agent.py + experience_buffer.py + normalizer.py + mp_optimizer.py — the PPO core your Phase 1 task needs, already written and device-parametric.
+- mimickit/learning/deepmimic-side: envs/deepmimic_env.py plus data/agents/deepmimic_humanoid_ppo_agent.yaml — phase-based tracking baseline, the right thing to get working BEFORE AMP.
+- mimickit/learning/add_agent.py + add_model.py — ADD (SIGGRAPH Asia 2025), the current best answer to AMP's reward-weight-tuning problem. Worth having as the fallback if AMP's discriminator misbehaves.
+- mimickit/engines/engine.py — the ~40-method ABC you implement once as mujoco_engine.py. This is the single file that defines your port surface; read it first.
+- mimickit/anim/motion.py + motion_lib.py + kin_char_model.py + mjcf_char_model.py — motion clip loading, interpolation, and MJCF kinematic-tree parsing. mjcf_char_model.py in particular already speaks MJCF, so it aligns with a MuJoCo backend.
+- data/assets/humanoid/humanoid.xml — a realistic human-proportioned 28-actuator MJCF humanoid with sane joint limits, armature and actuatorfrcrange. Use this rather than authoring your own; it is exactly the model the published AMP results use.
+- data/agents/amp_humanoid_agent.yaml and data/envs/amp_humanoid_env.yaml — known-good AMP hyperparameters and env settings (num_disc_obs_steps 10, key_bodies head/hands/feet, contact_bodies feet, early termination on, rand_reset on). Copy these values verbatim; they match the official ASE config.
+- tools/gmr_to_mimickit/ and tools/smpl_to_mimickit/ — retargeting converters from GMR and AMASS into MimicKit's motion format, for sourcing walking mocap.
+- mujoco.rollout (stdlib of the mujoco wheel) — gives you 14-thread batched stepping at 118k control-steps/s with no extra dependency. This is your vectorized-env layer; you do not need to write one.
+- ProtoMotions examples/experiments/mimic/mlp_complex_terrain.py and examples/experiments/path_follower/mlp.py — reference designs (config/reward/observation structure) for your Phase 4 terrain and Phase 5 waypoint tasks, readable even though you cannot run the framework.
+- ProtoMotions examples/experiments/mimic/fsq.py — reference for the FSQ/VQ-style latent motion prior if you later want a discriminator-free alternative to AMP.
+
+## Blockers
+
+- Isaac Gym is Linux-x86_64 + NVIDIA-only AND officially deprecated. This disqualifies ASE, CALM, PULSE, PHC/PHC+, ASAP and HumanoidVerse for training on this machine — bluntly, those repos are dead ends for you.
+- Isaac Lab requires Isaac Sim, which requires an NVIDIA RTX GPU. Not installable on macOS at all. This disqualifies MaskedMimic, whole_body_tracking/BeyondMimic, and ProtoMotions' training backends.
+- MuJoCo-Warp (and therefore mjlab) requires CUDA for training; its maintainers state macOS is evaluation-only.
+- MimicKit's Newton backend runs on this Mac but is ~200x too slow to train: I measured 587 control-steps/s at 64 envs and 702 at 256 envs, versus 118,807 for plain threaded MuJoCo. Cause: Warp's CPU backend executes single-threaded scalar code and does not multi-thread kernels; the mujoco_warp 'newton' solver is written for GPU SIMT.
+- The one-line fix I hypothesized (passing use_mujoco_cpu=True to route around the Warp solver) does NOT work: on newton==1.0.0 it raises NotImplementedError when combined with separate_worlds=True, and without separate_worlds it rejects multi-world models. On newton==1.5.0 that fast path DOES work in a standalone harness (93,146 ctrl-steps/s at 512 envs) but MimicKit's engine code is API-incompatible with 1.5.0 (Control.joint_target_pos was removed; SensorContact rejects include_total). You would have to port newton_engine.py to the Newton 1.5 API — comparable effort to just writing a MuJoCo engine, for worse throughput and a far heavier dependency stack.
+- Newton ships breaking API changes roughly every 4-6 weeks (1.0.0 2026-03-10 through 1.5.0 2026-08-11 = 6 releases in 5 months). Any Newton-based pin will rot fast. This is an argument against depending on it at all.
+- ASE, CALM and PHC pin torch==1.8.1 / numpy==1.21.1 / rl-games==1.1.4 (PHC: python 3.8 + pytorch-cuda=11.6). torch 1.8.1 has no macOS-arm64 wheel. These environments cannot be reconstructed on this machine even ignoring the simulator.
+- PULSE has no LICENSE file; ASE, CALM and PHC are GitHub-'NOASSERTION' (NVIDIA research-only / source-available terms). Verify licensing before copying code from any of them. MimicKit (Apache-2.0) and ProtoMotions (Apache-2.0) are clean.
+- MimicKit's motion data is NOT in the repo — data/motions/ is empty on clone and requires a manual SharePoint download. The humanoid.xml asset IS in git. Plan for that download or supply your own AMASS/GMR-retargeted clips.
+- MimicKit uses implicit top-level imports (`import learning.amp_agent`) rather than package-relative ones, so it must be run with mimickit/ on sys.path — a minor but real packaging annoyance when vendoring it.
+- Reusing MimicKit's learning code means also reusing mimickit/anim/ (motion.py, motion_lib.py, kin_char_model.py) — the motion representation is exponential-map based ([root pos 3D, root rot 3D, joint rotations], 1D joints as scalar angles), not quaternion. Budget time to understand it rather than assuming a quaternion layout.
+
+## Performance evidence
+
+- MEASURED BY ME on the target machine (M3 Max, macOS 26.5 25F71, arm64, python 3.12.13): MuJoCo 3.11.0 CPU, MimicKit humanoid.xml (nq=35 nv=34 nu=28), single-threaded mj_step = 67,577 sim-steps/s = 8,447 control-steps/s at 240Hz sim / 30Hz control (8 substeps).
+- MEASURED: MuJoCo 3.11.0 `mujoco.rollout` with a 14-thread pool on the same humanoid — 1 env 63,459 sim-steps/s; 8 envs 527,248; 32 envs 697,922; 128 envs 873,888; 512 envs 950,459 sim-steps/s = 118,807 control-steps/s. ~15x scaling over single-thread. This is the number to design around.
+- MEASURED: torch 2.13.0 MPS vs CPU on the AMP-sized net (105->1024->1024->28, MimicKit's fc_2layers_1024units). Batch 4096: CPU fwd 6.34ms (645,688 samp/s) / train-step 18.15ms; MPS fwd 1.65ms (2,488,172 samp/s) / train-step 4.73ms. Batch 32768: CPU 44.60ms fwd / 128.35ms train; MPS 13.70ms fwd / 40.34ms train. MPS is ~3.2x faster and torch.backends.mps.is_available() is True.
+- MEASURED: MimicKit's own Newton engine on this Mac (newton 1.0.0 + mujoco 3.5.0 + mujoco-warp 3.5.0.2 + warp-lang 1.12.0), 64 humanoid envs after 30-step warmup = 9.2 control-iters/s = 587 control-steps/s; 256 envs = 2.7 iters/s = 702 control-steps/s. Throughput is flat in env count, confirming a single-threaded CPU bottleneck rather than a warmup artifact.
+- MEASURED: standalone Newton 1.5.0 with SolverMuJoCo(use_mujoco_cpu=True, separate_worlds=True) on the same humanoid MJCF — 1 env 4,791 sim-steps/s; 64 envs 238,989; 512 envs 745,166 sim-steps/s = 93,146 control-steps/s. So Newton's classic-MuJoCo CPU path is competitive on Mac; it is specifically the Warp 'newton' solver path that MimicKit hardcodes which is catastrophically slow.
+- MEASURED: warp-lang 1.16.0 on macOS arm64 reports exactly — 'CUDA not enabled in this build', Devices: 'cpu':'arm', wp.is_cuda_available() False. warp_lang ships a macosx_11_0_arm64 wheel (2026-08-03), and newton 1.5.0 is a pure-python wheel (2026-08-11), so installation succeeds; only performance and API stability are the problems.
+- No published third-party benchmarks of AMP-class motion imitation on Apple Silicon were found. All numbers above are my own measurements on this machine, not literature values.
+
+## Sources
+
+- [xbpeng/MimicKit — suite of motion imitation methods (DeepMimic, AMP, ASE, AWR, LCP, ADD, SMP), Apache-2.0](https://github.com/xbpeng/MimicKit) — 2026-06-23 (last push, via GitHub API)
+- [MimicKit: A Reinforcement Learning Framework for Motion Imitation and Control (Xue Bin Peng)](https://arxiv.org/abs/2510.13794) — 2025-10-15 v1, 2026-01-18 v4
+- [MimicKit AMP agent — gradient penalty, replay buffer, logit reg, BCE disc loss, -log(1-D) reward](https://raw.githubusercontent.com/xbpeng/MimicKit/main/mimickit/learning/amp_agent.py) — retrieved 2026-08-13
+- [MimicKit Engine abstract base class — the porting surface for a MuJoCo backend](https://raw.githubusercontent.com/xbpeng/MimicKit/main/mimickit/engines/engine.py) — retrieved 2026-08-13
+- [MimicKit AMP humanoid hyperparameters (disc_grad_penalty 5, disc_logit_reg 0.01, disc_reward_scale 2, buffer 200000)](https://raw.githubusercontent.com/xbpeng/MimicKit/main/data/agents/amp_humanoid_agent.yaml) — retrieved 2026-08-13
+- [AMP: Adversarial Motion Priors for Stylized Physics-Based Character Control (Peng et al. 2021) — LSGAN, w_gp=10, r=max(0,1-0.25(D-1)^2), w_G=w_S=0.5](https://arxiv.org/abs/2104.02180) — 2021-04-05
+- [Official AMP/ASE reference implementation — uses BCEWithLogitsLoss and -log(1-sigmoid(D)), contradicting the paper's LSGAN](https://raw.githubusercontent.com/nv-tlabs/ASE/main/ase/learning/amp_agent.py) — retrieved 2026-08-13
+- [Official AMP humanoid config — amp_replay_keep_prob 0.01, disc_grad_penalty 5, task_reward_w 0.0](https://raw.githubusercontent.com/nv-tlabs/ASE/main/ase/data/cfg/train/rlg/amp_humanoid.yaml) — retrieved 2026-08-13
+- [NVIDIA Isaac Gym — 'This is legacy software... it is no longer supported'; recommends Isaac Lab](https://developer.nvidia.com/isaac-gym) — retrieved 2026-08-13
+- [NVlabs/ProtoMotions — AMP, ASE, ADD, MaskedMimic, GPC, FSQ latent mimic; Apache-2.0](https://github.com/NVlabs/ProtoMotions) — 2026-08-11 (last push)
+- [ProtoMotions MuJoCo backend — 'CPU-only and single-environment only', inference/debugging use](https://raw.githubusercontent.com/NVlabs/ProtoMotions/main/requirements_mujoco.txt) — retrieved 2026-08-13
+- [mjlab README — 'mjlab requires an NVIDIA GPU for training. macOS is supported for evaluation only.'](https://github.com/mujocolab/mjlab) — 2026-08-12 (last push)
+- [ADD: Physics-Based Motion Imitation with Adversarial Differential Discriminators (SIGGRAPH Asia 2025) — removes manual reward weight tuning](https://arxiv.org/abs/2505.04961) — 2025-05-08
+- [BeyondMimic: From Motion Tracking to Versatile Humanoid Control via Guided Diffusion](https://arxiv.org/abs/2508.08241) — 2025-08-11
+- [BeyondMimic official training repo — Isaac Lab based, MIT](https://github.com/HybridRobotics/whole_body_tracking) — 2026-07-24 (last push)
+- [GMR: General Motion Retargeting, MIT — ships MimicKit format support (2025-11-08)](https://github.com/YanjieZe/GMR) — 2026-04-02 (last push)
+- [PHC / PHC+ (Perpetual Humanoid Control) — Isaac Gym, python 3.8, pytorch-cuda=11.6, NOASSERTION license](https://github.com/ZhengyiLuo/PHC) — 2025-08-21 (last push)
+- [PULSE (ICLR 2024) — Isaac Gym + rl-games 1.1.4, no LICENSE file](https://github.com/ZhengyiLuo/PULSE) — 2025-02-08 (last push)
+- [CALM — abandoned, torch==1.8.1 / rl-games 1.1.4, Isaac Gym](https://github.com/NVlabs/CALM) — 2023-07-16 (last push)
+- [ASAP (RSS 2025) — Isaac Gym Preview4 / IsaacSim / Genesis, linux-64 platform badge, MIT](https://github.com/LeCAR-Lab/ASAP) — 2026-01-06 (last push)
+- [HumanoidVerse — multi-simulator (IsaacGym/IsaacSim/Genesis) humanoid RL, MIT](https://github.com/LeCAR-Lab/HumanoidVerse) — 2025-06-12 (last push)
+- [Newton physics PyPI — 1.5.0, pure-python wheel; 6 releases Mar-Aug 2026 with breaking API changes](https://pypi.org/project/newton/) — 2026-08-11
+- [warp-lang PyPI — ships macosx_11_0_arm64 wheel; CUDA not enabled in the macOS build](https://pypi.org/project/warp-lang/) — 2026-08-03
+- [MuJoCo PyPI 3.11.0 — cp312 macosx_11_0_arm64 wheel available](https://pypi.org/project/mujoco/) — 2026-07-28
+- [jax-metal 0.1.1 — last release Oct 2024, effectively abandoned; rules out MJX-on-Metal](https://pypi.org/project/jax-metal/) — 2024-10-08

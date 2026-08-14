@@ -1,0 +1,38 @@
+<!--
+  Scene wrapper: the humanoid body plus a ground plane, lighting and camera.
+
+  The upstream MimicKit humanoid (Apache-2.0) ships no floor geom, which is deliberate and
+  convenient: the ground belongs to the scene, not the character. Keeping it separate means
+  Phase 4 can swap this plane for a procedural heightfield without touching the body model,
+  and the body file stays byte-identical to upstream so mocap retargeting tools keep working.
+
+  Actuators are converted from torque motors to PD position servos at load time by
+  humanoid_rl/envs/model_prep.py rather than being edited here, for the same reason.
+-->
+<mujoco model="humanoid_scene">
+  <include file="amp_humanoid_mimickit.xml"/>
+
+  <statistic center="0 0 1.0" extent="2.0"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="140" elevation="-20" offwidth="1280" offheight="960"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+             width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 4" dir="0 0 -1" directional="true"/>
+    <!-- Friction 1.0 is the standard value for locomotion. Too low and the humanoid learns
+         to skate, which looks wrong and does not transfer to varied terrain. -->
+    <geom name="floor" type="plane" size="0 0 0.05" material="groundplane"
+          friction="1.0 0.005 0.0001" condim="3"/>
+  </worldbody>
+</mujoco>

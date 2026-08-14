@@ -1,0 +1,93 @@
+# Phase 3 Stage 1: DeepMimic-style motion tracking.
+#
+# A bring-up check, not the final objective. It proves the PD gains can physically follow a
+# real human trajectory, that contacts let the feet push off, and that reference state
+# initialization works, all while failures are still diagnosable. The research was blunt
+# that skipping this is how people end up with an AMP run that never yields a clean gait.
+
+run:
+  name: tracking
+  seed: 0
+  device: auto
+  task: tracking
+  total_env_steps: 400_000_000
+  output_dir: runs
+
+env:
+  model_path: humanoid_rl/models/humanoid_scene.xml
+  num_envs: 4096
+  num_workers: null       # all performance cores; Phase 2 has finished
+  decimation: 4
+  # 6.0 s at 125 Hz, comfortably longer than a stride cycle. Was 300 with the same "6 s"
+  # comment, which assumed a 50 Hz control loop; 300 steps is actually 2.4 s, barely two
+  # stride cycles. See the note in configs/default.yaml.
+  max_episode_steps: 750
+
+clip_dir: data/clips
+clip_include: [FW, BW, SW, TR1, ID]
+
+network:
+  actor_hidden: [512, 512]
+  critic_hidden: [512, 512]
+  activation: elu
+  init_noise_std: 0.6     # lower than Phase 2: tracking needs precision, not exploration
+
+ppo:
+  horizon: 24
+  gamma: 0.99
+  gae_lambda: 0.95
+  learning_rate: 1.0e-3
+  num_epochs: 5
+  num_minibatches: 4
+  clip_ratio: 0.2
+  value_loss_coef: 1.0
+  entropy_coef: 0.001     # tracking is a precision task; less entropy pressure
+  max_grad_norm: 1.0
+  clip_value_loss: true
+  bounds_loss_coef: 10.0
+  log_std_max: 0.0
+  adaptive_lr: true
+  desired_kl: 0.01
+  lr_min: 1.0e-5
+  lr_max: 1.0e-2
+  normalize_advantage: true
+  obs_clip: 10.0
+
+tracking:
+  w_pose: 0.65
+  w_vel: 0.10
+  w_end_effector: 0.15
+  w_root: 0.15          # full 3D root position; was height-only and blind to drift
+  k_pose: 2.0
+  k_vel: 0.1
+  k_end_effector: 40.0
+  k_root: 10.0
+  w_upright: 0.1
+  max_pose_error: 1.2
+  max_root_error: 0.9
+  terminate_torso_upright: 0.4
+  n_future_frames: 2
+  future_stride: 5
+
+domain_rand:
+  # Off for the bring-up. Tracking a reference under randomised physics is a harder
+  # problem, and this run exists to answer "is tracking possible at all".
+  enabled: false
+  model_pool_size: 1
+  push_interval_s: 0.0
+
+eval:
+  interval_iterations: 25
+  num_episodes: 32
+  num_envs: 64
+  video_every_n_evals: 4
+  video_on_best: true
+  video_width: 640
+  video_height: 480
+  video_fps: 50
+  keep_last_videos: 8
+
+log:
+  checkpoint_interval_iterations: 100
+  keep_last_checkpoints: 5
+  log_interval_iterations: 1

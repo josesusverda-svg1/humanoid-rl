@@ -1,0 +1,228 @@
+# Phase 3 Stage 2: velocity-command locomotion with an Adversarial Motion Prior.
+#
+# Same task as Phase 2, but half the reward now comes from a discriminator trained on real
+# human mocap. Hyperparameters follow the AMP PAPER (Table 4), not the widely-copied Isaac
+# Gym config: the paper trained on 16 CPU cores with small batches, so its numbers are
+# already the CPU-scale ones. See docs/research/amp-motion-imitation.md.
+
+run:
+  name: amp
+  seed: 0
+  device: auto
+  task: amp
+  total_env_steps: 400_000_000
+  output_dir: runs
+
+env:
+  model_path: humanoid_rl/models/humanoid_scene.xml
+  num_envs: 4096
+  num_workers: null
+  decimation: 4
+  # 20.0 s at this project's 125 Hz control loop. Was 600 with the comment "12 s", which
+  # assumed a 50 Hz loop we do not have; 600 steps was actually 4.8 s. See the note in
+  # configs/default.yaml.
+  max_episode_steps: 2500
+
+clip_dir: data/clips
+# All eight clips. FR/BR/SR (the fast ones) were excluded while the command range asked for
+# 1.5 m/s, so the discriminator had no real example of fast walking to compare against and
+# scored anything quick as fake. Measured clip speeds: FW 0.65, FR 1.24, BW 0.60, BR 0.89,
+# SW 0.52, SR 0.97, TR1 0.85 m/s.
+clip_include: [FW, FR, BW, BR, SW, SR, TR1, ID]
+# Train on the left-right reflection of every clip as well. The performer's own walk is
+# mildly uneven (1.08 on stance fraction, 1.14 median across joint pairs, worst 1.38 at the
+# elbow) and AMP reproduces whatever distribution it is shown, so without this the
+# discriminator rewards that imbalance as part of looking human. Doubles the library from
+# 150s to 300s at no retargeting cost.
+mirror_clips: true
+
+network:
+  actor_hidden: [512, 512]
+  critic_hidden: [512, 512]
+  activation: elu
+  init_noise_std: 0.8    # near XBot's 1.0; ceiling removed so it can settle freely
+
+ppo:
+  horizon: 24
+  gamma: 0.99
+  gae_lambda: 0.95
+  learning_rate: 1.0e-3
+  num_epochs: 5
+  num_minibatches: 4
+  clip_ratio: 0.2
+  value_loss_coef: 1.0
+  # Zero. With 28 action dims an entropy bonus is what drives log_std into its ceiling,
+  # and the ceiling is a gradient sink. The command and gait sampling now supply the
+  # behavioural diversity an entropy bonus was standing in for.
+  entropy_coef: 0.01     # Booster T1; all refs use a positive bonus
+  max_grad_norm: 1.0
+  clip_value_loss: true
+  bounds_loss_coef: 1.0  # T1-scale; 10.0 was ours
+  # Gait symmetry. A bilaterally symmetric body walking straight ahead should look the same
+  # in a mirror; nothing else in the setup says so. Without any symmetry pressure this
+  # policy settled into a one-sided gait: left foot in stance 0.58 of the time against the
+  # right's 0.30, right leg airborne 2.9x longer. Every aggregate metric was blind to it
+  # because they all sum over both legs; a human watching a video caught it.
+  #
+  # The first attempt used the penalty term below at 2.0 and failed instructively. That
+  # term is zero for any policy whose output ignores its input, so "hold a symmetric pose"
+  # is one of its global optima, and PPO found it: a 61 cm wide two-footed brace, both feet
+  # loaded 90% of the time, 6 cm of travel per foot strike. It then looked nothing like the
+  # mocap, so the AMP style reward decayed from 0.40 to 0.21 and stopped pulling it back.
+  #
+  # Data augmentation instead. Reflecting a transition of a symmetric body gives a genuine
+  # transition, so adding it to the batch is unbiased, and a constant symmetric policy earns
+  # no return on either copy. The brace is simply not a solution to it.
+  symmetry_loss_coef: 0.0
+  symmetry_augment: true
+  # Exploration noise ceiling, as log(std). -0.70 is std 0.50.
+  #
+  # Was 0.0 (std 1.0) on an action range of [-1, 1], which is enormous: measured on this
+  # project's own checkpoint by rescaling noise at rollout time, std 1.0 earned 1.148
+  # reward/step against 1.802 at std 0.5, 2.087 at std 0.25 and 2.239 deterministic. The
+  # noise was destroying 49% of the reward and PPO was optimising the degraded policy.
+  # Half of that loss came from two terms that are pure noise taxes, ang_vel_xy and
+  # action_rate, the latter being iid per-step noise no policy can reduce except by
+  # shrinking sigma.
+  log_std_max: 5.0       # no reference caps the learned std; numeric guard only
+  adaptive_lr: true
+  desired_kl: 0.01
+  lr_min: 1.0e-5
+  lr_max: 1.0e-2
+  normalize_advantage: true
+  obs_clip: 10.0
+
+amp:
+  n_obs_frames: 2             # the paper's value; MimicKit's 10 is a later change
+  hidden: [1024, 512]
+  task_reward_weight: 0.5
+  style_reward_weight: 0.5
+  grad_penalty_coef: 10.0     # raised from the paper's 5.0, per the small-batch guidance
+  logit_reg_coef: 0.01
+  weight_decay: 1.0e-4
+  # Slowed relative to the paper, and the policy is WARM-STARTED from the Phase 2 walker
+  # (--init-from). Both were needed.
+  #
+  # From a random policy the discriminator won trivially: accuracy 0.53 -> 0.98 in 97
+  # iterations with acc_real pinned at 1.00, the gradient penalty collapsing 4.67 -> 0.65,
+  # and the style reward FALLING 0.54 -> 0.31 while task return rose. Slowing it 4x only
+  # delayed that to iteration 233.
+  #
+  # A feature-level diagnosis showed why slowing it further was the wrong lever: overall
+  # real-vs-policy separability was only 0.28 with NO dominant artifact, the most separable
+  # feature being the neck. The discriminator was correctly reporting that a from-scratch
+  # policy does not move like a person. The fix is to start from one that already walks.
+  learning_rate: 5.0e-5
+  n_epochs: 1                 # was 2
+  batch_size: 512
+  replay_size: 100000
+  replay_keep_prob: 0.05
+  bounded_reward: true        # LSGAN, bounded in [0,1]; the BCE variant can blow up
+
+amp_task:
+  # Same envelope fix as configs/default.yaml, and it matters MORE here. At the old values
+  # only 17% of moving commands landed inside the clip library's 0.52-1.24 m/s, so for most
+  # of every episode the discriminator was shown a policy moving slower than any human it
+  # had ever seen and correctly scored it fake. That is the likeliest reason the style reward
+  # fell 0.54 -> 0.31 while discriminator accuracy climbed to 0.98. Now 70% land in band.
+  lin_vel_x_range: [-0.8, 1.5]
+  lin_vel_y_range: [-0.6, 0.6]
+  ang_vel_yaw_range: [-1.0, 1.0]
+  forward_bias_prob: 0.4
+  forward_cone_deg: 30.0
+  zero_command_prob: 0.05
+  rsi_prob: 0.85              # reference state initialization; AMP calls this essential
+  reference_command_prob: 0.5
+  task_reward_weight: 0.5
+  style_reward_weight: 0.5
+  # Gait terms restored to their Phase 2 strength. They were first weakened
+  # (w_feet_slip -0.1, w_feet_air_time 0.0) on the reasoning that the motion prior should
+  # own gait shaping and hand-written terms should get out of its way. Seven consecutive
+  # evaluations over 350 iterations said otherwise: foot slip sat at 42-51% of travel speed
+  # against Phase 2's 27%, and never trended down. At a style reward of ~0.23 the prior is
+  # not strong enough to replace them, so it works ALONGSIDE them rather than instead.
+  w_lin_vel: 1.0
+  w_ang_vel: 0.5
+  w_upright: 0.1
+  w_height: 0.1
+  w_alive: 0.5
+  w_torque: -1.0e-5   # XBot scale; T1's -2e-4 drowned our positive budget (measured -9.4/step)
+  w_action_rate: -0.01
+  w_feet_air_time: 0.5
+  w_flight: -0.3
+  w_feet_slip: -0.2
+  # --- rhythm, added after a human watching a video described the gait as "walking like a
+  # horse": a fixed split stance with the right foot locked 36 cm in front, both feet
+  # pattering 7.4 times a second while the body rocked over them. Measured, it swapped which
+  # foot led only 0.42 times a second against 7.4 foot strikes; in a real walk those are
+  # equal. Velocity tracking, air time, slip, symmetry and uprightness were all satisfied.
+  w_gait_phase: 1.0
+  gait_frequency: 0.9      # strides/s -> 1.8 foot strikes/s, human walking cadence
+  stance_fraction: 0.6     # -> 0.20 double support, 0.00 flight, both human
+  # --- vertical bounce. The same policy pogoed 10.0 cm peak-to-peak against a human's 4-5,
+  # with vertical speed peaking at 1.17 m/s, because nothing in the reward opposed it. The
+  # height term scores POSITION and a body can oscillate hard while averaging exactly right.
+  w_vertical_vel: -0.8
+  w_ang_vel_xy: -0.05
+  # --- going where it was pointed. A policy told to walk straight forward drifted 47 degrees
+  # in 11 seconds and finished 2.6 m to the side, with sideways speed at 53% of forward,
+  # while scoring well on every velocity term. Two reasons, both fixed:
+  #   * sideways error shared one saturating exponential with forward error, so it was
+  #     tradeable; it now has its own narrow kernel
+  #   * the command is a turn RATE, so "0" never meant "keep facing that way", and the
+  #     policy could not even SEE its heading error. It is now in the observation.
+  w_lateral_vel: 0.4
+  sigma_lateral_vel: 0.05
+  w_heading: 0.5
+  sigma_heading: 0.15
+
+
+  w_torso_upright: 0.2
+  w_head_height: 0.1
+  sigma_lin_vel: 0.25
+  sigma_ang_vel: 0.25
+  sigma_height: 0.02
+  # Only the STANDING fallback now: when the gait clock is running the reward derives the
+  # swing target from it as (1 - stance_fraction) / frequency. Set to match the nominal
+  # schedule so the two can never disagree again, which they silently did for a whole run.
+  air_time_target: 0.44
+  target_height: 0.877
+  terminate_height: 0.55
+  max_tilt: 0.7
+  terminate_torso_upright: 0.5
+  terminate_head_ratio: 0.65
+  joint_pos_noise: 0.02
+  joint_vel_noise: 0.02
+
+domain_rand:
+  enabled: true
+  model_pool_size: 64
+  friction_range: [0.5, 1.25]
+  mass_scale_range: [0.85, 1.15]
+  com_offset: 0.015
+  kp_scale_range: [0.85, 1.15]
+  kd_scale_range: [0.85, 1.15]
+  armature_scale_range: [1.0, 1.1]
+  obs_noise_joint_pos: 0.01
+  obs_noise_joint_vel: 0.15
+  obs_noise_gravity: 0.02
+  obs_noise_lin_vel: 0.05
+  obs_noise_ang_vel: 0.10
+  push_interval_s: 5.0
+  push_vel_xy: 0.7
+
+eval:
+  interval_iterations: 50
+  num_episodes: 32
+  num_envs: 64
+  video_every_n_evals: 4
+  video_on_best: true
+  video_width: 640
+  video_height: 480
+  video_fps: 50
+  keep_last_videos: 12
+
+log:
+  checkpoint_interval_iterations: 100
+  keep_last_checkpoints: 5
+  log_interval_iterations: 1

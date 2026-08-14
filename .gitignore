@@ -1,0 +1,20 @@
+# Training output. 2.1 GB and growing; every run is reproducible from its config.yaml.
+runs/
+
+# Retargeted mocap, 1.4 GB. Licensed source material, not ours to redistribute.
+data/
+
+# Environments and build products.
+.venv/
+node_modules/
+dashboard/frontend/dist/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Generated per-launch configs, written by scripts from configs/default.yaml.
+configs/.*.yaml
+
+# Simulator noise.
+MUJOCO_LOG.TXT
+.ablate-*.yaml

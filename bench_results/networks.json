@@ -1,0 +1,342 @@
+{
+  "hardware": {
+    "chip": "Apple M3 Max",
+    "gpu_cores": 30,
+    "p_cores": 10
+  },
+  "network": {
+    "obs_dim": 76,
+    "hidden": [
+      512,
+      512
+    ],
+    "act_dim": 21
+  },
+  "torch_version": "2.13.0",
+  "results": [
+    {
+      "backend": "torch-cpu",
+      "mode": "inference",
+      "batch": 256,
+      "per_call_ms": 0.5437087500467896,
+      "calls_per_sec": 1839.21998664532,
+      "samples_per_sec": 470840.3165812019,
+      "notes": "actor forward, no_grad"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "inference",
+      "batch": 1024,
+      "per_call_ms": 0.9809541700815315,
+      "calls_per_sec": 1019.4156164470818,
+      "samples_per_sec": 1043881.5912418118,
+      "notes": "actor forward, no_grad"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "inference",
+      "batch": 4096,
+      "per_call_ms": 3.0068587500136346,
+      "calls_per_sec": 332.57298833723587,
+      "samples_per_sec": 1362218.9602293181,
+      "notes": "actor forward, no_grad"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "inference",
+      "batch": 16384,
+      "per_call_ms": 11.538815410021925,
+      "calls_per_sec": 86.66400877957193,
+      "samples_per_sec": 1419903.1198445065,
+      "notes": "actor forward, no_grad"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "inference+transfer",
+      "batch": 256,
+      "per_call_ms": 0.5362116699689068,
+      "calls_per_sec": 1864.9351664763035,
+      "samples_per_sec": 477423.4026179337,
+      "notes": "numpy -> device -> forward -> numpy"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "inference+transfer",
+      "batch": 1024,
+      "per_call_ms": 1.011428329948103,
+      "calls_per_sec": 988.7008010259219,
+      "samples_per_sec": 1012429.620250544,
+      "notes": "numpy -> device -> forward -> numpy"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "inference+transfer",
+      "batch": 4096,
+      "per_call_ms": 3.0347741600417066,
+      "calls_per_sec": 329.51381132962365,
+      "samples_per_sec": 1349688.5712061385,
+      "notes": "numpy -> device -> forward -> numpy"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "inference+transfer",
+      "batch": 16384,
+      "per_call_ms": 11.5199716600182,
+      "calls_per_sec": 86.80576910363858,
+      "samples_per_sec": 1422225.7209940145,
+      "notes": "numpy -> device -> forward -> numpy"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "train",
+      "batch": 1024,
+      "per_call_ms": 6.630777499813121,
+      "calls_per_sec": 150.81187689199098,
+      "samples_per_sec": 154431.36193739876,
+      "notes": "PPO-shaped fwd+bwd+AdamW"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "train",
+      "batch": 4096,
+      "per_call_ms": 16.972854180203285,
+      "calls_per_sec": 58.917609812872556,
+      "samples_per_sec": 241326.529793526,
+      "notes": "PPO-shaped fwd+bwd+AdamW"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "train",
+      "batch": 16384,
+      "per_call_ms": 53.7583450000966,
+      "calls_per_sec": 18.601763130881412,
+      "samples_per_sec": 304771.28713636106,
+      "notes": "PPO-shaped fwd+bwd+AdamW"
+    },
+    {
+      "backend": "torch-cpu",
+      "mode": "train",
+      "batch": 65536,
+      "per_call_ms": 218.17979915998876,
+      "calls_per_sec": 4.583375747205228,
+      "samples_per_sec": 300376.1129688418,
+      "notes": "PPO-shaped fwd+bwd+AdamW"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "inference",
+      "batch": 256,
+      "per_call_ms": 0.24130042002070695,
+      "calls_per_sec": 4144.211601099518,
+      "samples_per_sec": 1060918.1698814766,
+      "notes": "actor forward, no_grad"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "inference",
+      "batch": 1024,
+      "per_call_ms": 0.28262874999199994,
+      "calls_per_sec": 3538.210461703935,
+      "samples_per_sec": 3623127.5127848294,
+      "notes": "actor forward, no_grad"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "inference",
+      "batch": 4096,
+      "per_call_ms": 0.5566749999707099,
+      "calls_per_sec": 1796.3802938026965,
+      "samples_per_sec": 7357973.683415845,
+      "notes": "actor forward, no_grad"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "inference",
+      "batch": 16384,
+      "per_call_ms": 2.09386791990255,
+      "calls_per_sec": 477.5850427311292,
+      "samples_per_sec": 7824753.340106821,
+      "notes": "actor forward, no_grad"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "inference+transfer",
+      "batch": 256,
+      "per_call_ms": 0.6374195900571067,
+      "calls_per_sec": 1568.8253320084023,
+      "samples_per_sec": 401619.284994151,
+      "notes": "numpy -> device -> forward -> numpy"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "inference+transfer",
+      "batch": 1024,
+      "per_call_ms": 0.6944808299886063,
+      "calls_per_sec": 1439.9245548885865,
+      "samples_per_sec": 1474482.7442059126,
+      "notes": "numpy -> device -> forward -> numpy"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "inference+transfer",
+      "batch": 4096,
+      "per_call_ms": 1.0855683300178498,
+      "calls_per_sec": 921.1764679829572,
+      "samples_per_sec": 3773138.8128581927,
+      "notes": "numpy -> device -> forward -> numpy"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "inference+transfer",
+      "batch": 16384,
+      "per_call_ms": 2.7853974999743514,
+      "calls_per_sec": 359.0151854481123,
+      "samples_per_sec": 5882104.798381872,
+      "notes": "numpy -> device -> forward -> numpy"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "train",
+      "batch": 1024,
+      "per_call_ms": 1.6373825000482611,
+      "calls_per_sec": 610.7308463175375,
+      "samples_per_sec": 625388.3866291584,
+      "notes": "PPO-shaped fwd+bwd+AdamW"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "train",
+      "batch": 4096,
+      "per_call_ms": 3.4132800000952557,
+      "calls_per_sec": 292.9733277000693,
+      "samples_per_sec": 1200018.750259484,
+      "notes": "PPO-shaped fwd+bwd+AdamW"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "train",
+      "batch": 16384,
+      "per_call_ms": 12.49524332000874,
+      "calls_per_sec": 80.03045434086837,
+      "samples_per_sec": 1311218.9639207874,
+      "notes": "PPO-shaped fwd+bwd+AdamW"
+    },
+    {
+      "backend": "torch-mps",
+      "mode": "train",
+      "batch": 65536,
+      "per_call_ms": 61.422414160042536,
+      "calls_per_sec": 16.28070165712463,
+      "samples_per_sec": 1066972.0638013198,
+      "notes": "PPO-shaped fwd+bwd+AdamW"
+    },
+    {
+      "backend": "mlx",
+      "mode": "inference",
+      "batch": 256,
+      "per_call_ms": 0.3204562500468455,
+      "calls_per_sec": 3120.550776756004,
+      "samples_per_sec": 798860.998849537,
+      "notes": "actor forward"
+    },
+    {
+      "backend": "mlx",
+      "mode": "inference",
+      "batch": 1024,
+      "per_call_ms": 0.39691917001619004,
+      "calls_per_sec": 2519.4046434169727,
+      "samples_per_sec": 2579870.35485898,
+      "notes": "actor forward"
+    },
+    {
+      "backend": "mlx",
+      "mode": "inference",
+      "batch": 4096,
+      "per_call_ms": 0.7550354200066067,
+      "calls_per_sec": 1324.4411765361283,
+      "samples_per_sec": 5424911.0590919815,
+      "notes": "actor forward"
+    },
+    {
+      "backend": "mlx",
+      "mode": "inference",
+      "batch": 16384,
+      "per_call_ms": 2.2355870899627917,
+      "calls_per_sec": 447.30979369568803,
+      "samples_per_sec": 7328723.659910153,
+      "notes": "actor forward"
+    },
+    {
+      "backend": "mlx",
+      "mode": "inference+transfer",
+      "batch": 256,
+      "per_call_ms": 0.30964250006945804,
+      "calls_per_sec": 3229.530829184247,
+      "samples_per_sec": 826759.8922711672,
+      "notes": "numpy -> mx.array -> forward -> numpy"
+    },
+    {
+      "backend": "mlx",
+      "mode": "inference+transfer",
+      "batch": 1024,
+      "per_call_ms": 0.41832875009276904,
+      "calls_per_sec": 2390.4644368292616,
+      "samples_per_sec": 2447835.583313164,
+      "notes": "numpy -> mx.array -> forward -> numpy"
+    },
+    {
+      "backend": "mlx",
+      "mode": "inference+transfer",
+      "batch": 4096,
+      "per_call_ms": 0.7877695799106732,
+      "calls_per_sec": 1269.406721840404,
+      "samples_per_sec": 5199489.932658295,
+      "notes": "numpy -> mx.array -> forward -> numpy"
+    },
+    {
+      "backend": "mlx",
+      "mode": "inference+transfer",
+      "batch": 16384,
+      "per_call_ms": 2.3456650000298396,
+      "calls_per_sec": 426.3183361593743,
+      "samples_per_sec": 6984799.619635189,
+      "notes": "numpy -> mx.array -> forward -> numpy"
+    },
+    {
+      "backend": "mlx",
+      "mode": "train",
+      "batch": 1024,
+      "per_call_ms": 1.3553291599964723,
+      "calls_per_sec": 737.8281450113585,
+      "samples_per_sec": 755536.0204916311,
+      "notes": "PPO-shaped fwd+bwd+AdamW (actor only)"
+    },
+    {
+      "backend": "mlx",
+      "mode": "train",
+      "batch": 4096,
+      "per_call_ms": 3.498529999924358,
+      "calls_per_sec": 285.83433614164267,
+      "samples_per_sec": 1170777.4408361684,
+      "notes": "PPO-shaped fwd+bwd+AdamW (actor only)"
+    },
+    {
+      "backend": "mlx",
+      "mode": "train",
+      "batch": 16384,
+      "per_call_ms": 14.33791250019567,
+      "calls_per_sec": 69.74515990290448,
+      "samples_per_sec": 1142704.699849187,
+      "notes": "PPO-shaped fwd+bwd+AdamW (actor only)"
+    },
+    {
+      "backend": "mlx",
+      "mode": "train",
+      "batch": 65536,
+      "per_call_ms": 53.36623250012053,
+      "calls_per_sec": 18.738441016943465,
+      "samples_per_sec": 1228042.470486407,
+      "notes": "PPO-shaped fwd+bwd+AdamW (actor only)"
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+[project]
+name = "humanoid-rl"
+version = "0.1.0"
+description = "Human-like humanoid locomotion with RL, tuned for Apple Silicon (M3 Max)"
+readme = "README.md"
+# Pinned to 3.12: best wheel coverage across MuJoCo, PyTorch, MLX and JAX on macOS arm64
+# as of 2026-08. 3.13 still has gaps in this specific stack.
+requires-python = ">=3.12,<3.13"
+
+# Exact pins, not ranges. These are the versions every measurement in DESIGN.md was taken
+# with, and several of the findings there are version-specific: the gradient penalty works
+# on MPS in torch 2.13.0 despite a still-open upstream issue, and mujoco 3.11.0 supplies
+# both `mj_step(nstep=...)` and the MjSpec API this project depends on.
+dependencies = [
+    # --- physics ---
+    "mujoco==3.11.0",          # C engine + Python bindings, CPU, arm64 native
+    # --- numerics ---
+    "numpy==2.5.2",
+    "scipy==1.18.0",           # savgol_filter for mocap smoothing, Rotation for BVH
+    # --- neural networks ---
+    "torch==2.13.0",           # MPS (Metal) backend
+    "mlx==0.32.0",             # documented fallback, see DESIGN.md section 3
+    # --- config, logging, CLI ---
+    "pyyaml==6.0.3",
+    "rich==15.0.0",
+    "psutil==7.2.2",           # per-core utilisation, used by hwcheck
+    # --- video export ---
+    "imageio==2.37.4",
+    "imageio-ffmpeg==0.6.0",
+]
+
+[project.optional-dependencies]
+# Dashboard backend. The frontend is a separate npm workspace under dashboard/frontend.
+dashboard = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.1",
+]
+# JAX / MJX, kept isolated and NOT on the critical path. Phase 0 established there is no
+# usable GPU path for it on Apple Silicon: jax-metal was last released 2024-10-08 and is
+# abandoned. Present only so the benchmark in DESIGN.md can be reproduced.
+jax = [
+    "jax",
+    "mujoco-mjx",
+]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+ignore_missing_imports = true
