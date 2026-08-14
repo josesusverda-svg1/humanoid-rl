@@ -236,11 +236,25 @@ class LocomotionConfig:
     #: envelope. The earlier attempt at 0.45 failed for the opposite reason, but note it was
     #: measured against the OLD crushed envelope, where 0.45 difficulty meant a 0.17 m/s
     #: command that was cheaper to ignore than to follow. On this envelope it means 0.31.
-    difficulty_init: float = 0.7
-    #: The floor for demotion and for graduate recycling, not a starting point. 0.5 keeps
-    #: genuinely easy commands in the data forever, which is what stops the policy from
-    #: forgetting how to walk slowly once it can walk fast.
-    difficulty_min: float = 0.5
+    #: 0.75, which is also the floor: start at the easiest level worth training on and
+    #: earn everything above it. Was 0.7, which sat BELOW difficulty_min once the floor was
+    #: raised, so the very first command draw silently violated the floor.
+    difficulty_init: float = 0.75
+    #: The floor for demotion and for graduate recycling, not a starting point.
+    #:
+    #: 0.75, raised from 0.5 after 0.5 was measured to be a trap. A curriculum floor is a
+    #: promise about the EASIEST COMMAND YOU ARE WILLING TO TRAIN ON, and at difficulty 0.5
+    #: the median moving command is 0.37 m/s, which is the exact crawl the command-envelope
+    #: fix existed to eliminate.
+    #:
+    #: What happened (logbook E20): with 20 s episodes a fall becomes likely in almost any
+    #: episode, demotion (-0.10) fires more often than promotion (+0.05), and every
+    #: environment slid to the floor within 150 iterations and stayed there for the rest of
+    #: the run. The curriculum was working exactly as specified; the specification let it
+    #: park somewhere we already knew was useless. At 0.75 the floor is a 0.53 m/s median,
+    #: still inside the reference clip range, so the worst case is a slow walk and not a
+    #: shuffle.
+    difficulty_min: float = 0.75
     difficulty_promote: float = 0.05
     difficulty_demote: float = 0.10
     #: Promotion gates, judged per COMMAND SEGMENT (not per episode: with mid-episode

@@ -127,7 +127,10 @@ def main() -> int:
             for _ in range(cfg.fasttd3.num_updates):
                 metrics = agent.update()
 
-        if iteration % max(cfg.log.log_interval_iterations * 50, 1) == 0:
+        # Intervals are used AS WRITTEN, not multiplied. An off-policy iteration is one
+        # environment step, not a 24-step horizon, so the same number means something very
+        # different here than in the PPO trainer; the config carries off-policy values.
+        if iteration % max(cfg.log.log_interval_iterations, 1) == 0:
             elapsed = time.perf_counter() - started
             sps = env_steps / max(elapsed, 1e-9)
             logger.log_metrics(iteration, env_steps, {
@@ -142,7 +145,7 @@ def main() -> int:
                   f"eta {(total_iters - iteration) / max(iteration / elapsed, 1e-9) / 3600:>5.1f}h",
                   flush=True)
 
-        if iteration % (cfg.eval.interval_iterations * 50) == 0:
+        if iteration % max(cfg.eval.interval_iterations, 1) == 0:
             if eval_env is None:
                 eval_env = ThreadedVecEnv(
                     REPO_ROOT / cfg.env.model_path, task, num_envs=cfg.eval.num_envs,

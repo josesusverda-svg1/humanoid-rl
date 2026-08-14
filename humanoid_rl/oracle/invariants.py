@@ -582,6 +582,52 @@ def value_support_covers_reachable_return(config) -> list[Finding]:
         f"{ceiling:.0f}")]
 
 
+@check
+def curriculum_floor_is_worth_training_on(config) -> list[Finding]:
+    """The curriculum's FLOOR must still command a speed worth practising.
+
+    A floor is a promise about the easiest command you are willing to train on, and a
+    curriculum will find it. With 20 s episodes a fall is likely in almost any episode, so
+    demotion outruns promotion and every environment parks on the floor. If that floor is a
+    crawl, the run trains a crawler no matter what the top of the range says.
+
+    Checked against the same measured references as the command envelope: the retargeted
+    clips run 0.52-1.24 m/s, so a floor below 0.52 is outside anything we have a human
+    example of.
+    """
+    import numpy as np
+
+    task = config.task
+    if task.difficulty_min >= 1.0:
+        return [Finding(Severity.OK, "curriculum floor", "curriculum disabled")]
+
+    out: list[Finding] = []
+    if task.difficulty_init < task.difficulty_min:
+        out.append(Finding(
+            Severity.CONTRADICTION, "curriculum floor",
+            f"difficulty_init {task.difficulty_init} is below difficulty_min "
+            f"{task.difficulty_min}, so the starting level violates the floor.",
+            remedy="Set difficulty_init at or above difficulty_min.",
+        ))
+
+    scaled = np.linalg.norm(_sample_commands(config)[:, :2], axis=1) * task.difficulty_min
+    floor_median = float(np.median(scaled[scaled > 1e-9]))
+    if floor_median < 0.52:
+        out.append(Finding(
+            Severity.CONTRADICTION, "curriculum floor",
+            f"at difficulty_min {task.difficulty_min} the median moving command is "
+            f"{floor_median:.2f} m/s, below the slowest reference clip (0.52). A curriculum "
+            f"that demotes to this floor trains a crawl.",
+            remedy="Raise difficulty_min until the floor median clears 0.52 m/s.",
+            caught_before="Logbook E20: difficulty slid from 0.70 to the 0.50 floor within "
+                          "150 iterations and stayed there, commanding 0.36-0.40 m/s for the "
+                          "rest of the run.",
+        ))
+    return out or [Finding(
+        Severity.OK, "curriculum floor",
+        f"floor {task.difficulty_min} commands a median {floor_median:.2f} m/s")]
+
+
 def run_all(config, checkpoint: Path | None = None) -> list[Finding]:
     """Every invariant. Failures inside a check are reported, never raised."""
     findings: list[Finding] = []
