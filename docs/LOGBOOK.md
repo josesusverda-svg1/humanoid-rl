@@ -38,6 +38,9 @@ Three rules that keep this honest:
 | Weakening gait terms so AMP owns gait shaping | WORSE | E08 | Foot slip 42-51% of travel speed vs 27% baseline, over 7 evals, never trended down. |
 | Velocity-scaled swing-height target (KSLC) | NO EFFECT | E15 | Measured on our own mocap: mean swing clearance is `0.063 + 0.020*speed`. Worth ≤0.03/step across the whole envelope. Not our problem. |
 | `difficulty_init = 0.45` | WORSE | E13 | On the OLD crushed envelope this meant 0.17 m/s commands, cheaper to ignore than follow. Retried at 0.7 on the fixed envelope: E17. |
+| Reward normalisation to rescue FastTD3 | NO EFFECT | E22c | Critic measured unsaturated: 4.7e-16 mass on the top atom, 65 of 401 atoms in use. Scale is not the problem. |
+| Single-run A/B on training outcome | INVALID | E22b | Byte-identical configs gave 323 vs 2451 mean return. Any effect under ~7x is inside the noise. |
+| Replay ratio as the FastTD3 fix | WORSE | E22 | Ratio 2 and 16 both flat, 100% falls on 96 of 96 evals. |
 | `promote_gait_match = 0.80` | INVALID | E17 | Unreachable. Measured gait match runs 0.66-0.73. Standing alone scores 0.60, so the usable band is 0.60-1.0. |
 
 ## Instrumentation bugs found
@@ -80,6 +83,41 @@ AMP readiness: **NOT ready**. Passes "stays up", fails "obeys speed" (0.58 vs 0.
 ## Entries
 
 Newest first. `E##  date  what changed`.
+
+### E22  2026-08-14  Replay ratio 2 vs 16, and a finding that outranks it
+- **Change**: FastTD3 at replay ratio 2 and 16, both async, 50M env steps each, same seed, evals aligned to the same env-step grid.
+- **Result**: BOTH FLAT. 100% falls on all 96 evaluations across both arms.
+
+| env steps | ratio 2 | falls | ratio 16 | falls |
+|---|---|---|---|---|
+| 1.0M | 252 | 100% | 134 | 100% |
+| 13.3M | 316 | 100% | 563 | 100% |
+| 25.6M | 304 | 100% | 556 | 100% |
+| 44.0M | 398 | 100% | 483 | 100% |
+| best | 426 @ 17.4M | | 734 @ 3.1M | |
+
+- **Verdict**: WORSE. Replay ratio is not the deciding variable; the arms differ by less than the noise floor (see below) and both are far under PPO's 3034 at 7.4 s upright.
+- **Useful negative**: ratio-16 async tracked the earlier SYNC run point for point, so the async collector changes speed and not learning. That part is confirmed sound.
+
+### E22b  2026-08-14  **The noise floor: identical configs, 7.6x different outcomes**
+- **Found while adversarially reviewing an experiment design.** `runs/arm-warm-20260813-180357` and `runs/arm-warm-20260813-181716` have byte-identical `config.yaml` (verified by `diff`), the same `run.seed: 0`, the same warm start and the same 350 iterations.
+
+| | 180357 | 181716 |
+|---|---|---|
+| mean training return, iters 101-350 (n=245) | **323.2** | **2451.4** |
+| mean episode length | 133.5 | 789.8 |
+
+- One collapsed into the 100%-falls attractor; one held the walk. **Same settings, same seed.** Threaded physics across 10 workers and MPS kernels are both non-deterministic, so a seed does not pin a trajectory here.
+- **Verdict**: this is the single most important measurement in the logbook, because it sets the bar every other entry must clear.
+- **What it invalidates**: any conclusion drawn from comparing the TRAINING OUTCOME of two single runs where the effect was smaller than roughly 7x. That includes several claims in earlier entries.
+- **What it does NOT invalidate**: mechanical facts measured directly rather than through training. E14's `commanded_speed 0.38 -> 0.70` is a property of the sampler, verified by drawing 200k commands. E16's eval bias was proven by re-scoring fixed checkpoints. E21's throughput numbers are wall-clock. Those stand.
+- **How to apply**: an outcome comparison needs multiple seeds, or a within-run paired measurement, or an effect larger than 7x. A single-run A/B on final return cannot support a conclusion on this machine.
+
+### E22c  2026-08-14  Reward scale was NOT killing the off-policy arm
+- **My hypothesis, now disconfirmed.** I argued that 21 unnormalised reward terms spanning 0-3000 were overloading the TD3 critic, since PPO normalises advantages and is scale-invariant while TD3 is not.
+- **Measured on the ratio-2 best checkpoint**: mass on the top atom **4.7e-16** (saturation would be near 1.0), mass on the bottom atom 6.6e-17, **65 of 401 atoms in use**, E[Q] = 210 against a realised discounted return of the same order.
+- **Verdict**: the critic is fitting cleanly and is nowhere near saturated. Reward normalisation would not have fixed anything. Experiment dropped BEFORE spending compute on it.
+- **Also corrected**: the `value resolution` sub-check I added to the Oracle was wrong and has been removed. It warned that coarse atoms mean "one step of improvement may not move the target". False: the categorical projection is exactly mean-preserving and the actor consumes only `E[Q] = sum(p*z)`, which is continuous in the probabilities at any atom spacing. Coarse atoms limit the representable SHAPE of the distribution, not the quantity the policy gradient uses. A wrong check is worse than no check.
 
 ### E21  2026-08-14  Async collector: overlap physics and gradients
 - **Change**: `humanoid_rl/algos/async_collector.py`. Environment stepping moves to a background thread; the learner owns the replay buffer exclusively and the actor holds a policy snapshot. Enabled by `fasttd3.async_collection`.

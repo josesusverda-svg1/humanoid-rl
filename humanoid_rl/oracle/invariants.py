@@ -566,16 +566,14 @@ def value_support_covers_reachable_return(config) -> list[Finding]:
             caught_before="Not yet. This check exists because the failure is invisible: the "
                           "critic loss falls normally while the value function is constant.",
         ))
-    # Resolution matters too: too few atoms over too wide a range and neighbouring returns
-    # land on the same atom, which is the same blindness by a different route.
-    width = (td3.v_max - td3.v_min) / max(td3.num_atoms - 1, 1)
-    if width > 0.5 * positive:
-        out.append(Finding(
-            Severity.SUSPECT, "value resolution",
-            f"each atom spans {width:.2f} of return, more than half a single step's best "
-            f"reward ({positive:.2f}). One step of improvement may not move the target.",
-            remedy=f"Raise num_atoms above {int((td3.v_max - td3.v_min) / (0.5 * positive))}.",
-        ))
+    # A "value resolution" sub-check used to live here, warning when an atom spanned more
+    # than half a step's reward because "one step of improvement may not move the target".
+    # REMOVED: it was wrong, and a wrong check is worse than no check because it teaches the
+    # reader to skim findings. The categorical projection is exactly mean-preserving, and the
+    # actor consumes only E[Q] = sum(p * z), which is continuous in the probabilities at any
+    # atom spacing. Coarse atoms limit how finely the SHAPE of the return distribution can be
+    # represented; they do not quantise the quantity the policy gradient actually uses. The
+    # saturation check above is the real failure mode and it stays.
     return out or [Finding(
         Severity.OK, "value support",
         f"[{td3.v_min:.0f}, {td3.v_max:.0f}] over {td3.num_atoms} atoms covers a reachable "
