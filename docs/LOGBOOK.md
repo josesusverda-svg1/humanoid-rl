@@ -1,0 +1,193 @@
+# Logbook
+
+Every change, every result, every bug. Read before changing anything.
+
+## How to use this
+
+**Before you change something**, search this file for the knob you are about to touch:
+
+```bash
+python scripts/logbook.py --about swing_height
+python scripts/logbook.py --settled          # everything already ruled out
+```
+
+**After a run ends**, generate the entry skeleton with real numbers already filled in:
+
+```bash
+python scripts/logbook.py --run runs/<run-dir>
+```
+
+Three rules that keep this honest:
+
+1. **Write the prediction before the run, not after.** An entry whose "expected" column was
+   filled in afterwards teaches nothing, because everything looks predictable in hindsight.
+2. **A verdict is mandatory and one of five.** WORKED, NO EFFECT, WORSE, INVALID (the
+   measurement was broken so the run says nothing), MIXED. "Promising" is not a verdict.
+3. **When an instrumentation bug is found, go back and mark what it invalidated.** Four
+   times this week a bug meant earlier conclusions were about the metric, not the policy.
+
+---
+
+## Settled: do not retry without new information
+
+| Thing | Verdict | Entry | Why |
+|---|---|---|---|
+| `symmetry_loss_coef` as a reward penalty | WORSE | E03 | Zero for any policy ignoring its input. PPO found a 61 cm two-footed brace as a global optimum. Use mirror data augmentation instead. |
+| AMP from a non-walking policy | WORSE | E08 | Discriminator 0.53 → 0.98 accuracy in 97 iterations, style reward FELL 0.54 → 0.31. It correctly calls a crawl fake. Gate on `scripts/amp_readiness.py` first. |
+| Booster T1's `w_torque = -2e-4` | WORSE | E09 | Costs -9.4/step against a +6.4 positive budget. Use XBot's -1e-5. |
+| Weakening gait terms so AMP owns gait shaping | WORSE | E08 | Foot slip 42-51% of travel speed vs 27% baseline, over 7 evals, never trended down. |
+| Velocity-scaled swing-height target (KSLC) | NO EFFECT | E15 | Measured on our own mocap: mean swing clearance is `0.063 + 0.020*speed`. Worth ≤0.03/step across the whole envelope. Not our problem. |
+| `difficulty_init = 0.45` | WORSE | E13 | On the OLD crushed envelope this meant 0.17 m/s commands, cheaper to ignore than follow. Retried at 0.7 on the fixed envelope: E17. |
+| `promote_gait_match = 0.80` | INVALID | E17 | Unreachable. Measured gait match runs 0.66-0.73. Standing alone scores 0.60, so the usable band is 0.60-1.0. |
+
+## Instrumentation bugs found
+
+A bug here means earlier conclusions were about the *measurement*, not the policy. Each row
+lists what it invalidated.
+
+| Bug | Found | Invalidated | Fixed in |
+|---|---|---|---|
+| Videos played at 0.4x (125 Hz physics encoded at 50 fps) | E01 | Every visual gait judgement before it | `frame_skip`, `encode_fps` |
+| `gait_symmetry` scored 1.0 for standing still (defined over stance time) | E02 | Every symmetry claim before it | Redefined over SWING time |
+| `explained_variance` was tautological (`returns = advantages + values`) | E10 | All critic-quality claims | Renamed `advantage_share` |
+| Ablation ran 6 byte-identical arms (`amp.yaml` has no `task:` section) | E11 | The entire first ablation | `TASK_SECTION` + Oracle check |
+| **Eval counted the first 32 of 64 episodes to finish, which are the falls** | E16 | **Every fall rate, episode length and `best.pt` choice in project history** | One episode per env |
+| Episodes were 8 s, not the 20 s every comment claimed (50 Hz assumed, we run 125 Hz) | E18 | All "survived the episode" numbers; `command_hold_range` never fired | `max_episode_steps` 1000 → 2500 |
+| `log_std` sat above its clamp, which passes no gradient | E05 | 610 iterations of frozen exploration | In-place clamp after optimiser step |
+| Normaliser `COUNT_MAX = 1e6` destroyed warm starts | E06 | Warm-started runs before it | Cap removed |
+| Heading command was an integrated yaw rate, so the target spun away | E07 | All heading-error numbers before it | XBot heading command |
+
+## Current state
+
+Best policy: `runs/envelope-20260814-100402/checkpoints/best.pt` (PPO, 500M steps).
+All numbers below are post-E16, so they are the first trustworthy ones in the project.
+
+| Metric | Value | Human | Note |
+|---|---|---|---|
+| falls (deterministic) | 6% | - | at a held 1.0 m/s command |
+| forward speed | 0.78 m/s | 1.2-1.4 | mocap reference is 0.62 |
+| speed tracking ratio | 0.51-0.59 | 1.0 | responds to command, undershoots ~40% |
+| stride length | 0.30 m | 0.6-0.8 | was 0.11 three runs ago |
+| step rate | 2.62 /s | 1.6-2.0 | too fast |
+| stance width | 0.36 m | 0.10-0.15 | too wide |
+| **torso upright** | **0.54** | **0.95-1.00** | **worst term; it leans to go fast** |
+| human-likeness | 9% | 100% | fell from 15% as speed rose |
+
+AMP readiness: **NOT ready**. Passes "stays up", fails "obeys speed" (0.58 vs 0.70 needed).
+
+---
+
+## Entries
+
+Newest first. `E##  date  what changed`.
+
+### E20  2026-08-14  Curriculum collapsed to its floor  **(live, and my own fault)**
+- **What happened**: difficulty went 0.70 → 0.67 → 0.52 → **0.50 (floor) by iteration 150** and has been pinned there for 500 iterations. Commanded speed fell to 0.36-0.40 m/s, which is exactly the crawl E14 existed to fix.
+- **Cause**: I shipped E17 (curriculum on) and E18 (episodes 8 s → 20 s) in the SAME run, against my own one-variable rule. Twenty-second episodes make "survive without falling" a 2.5x harder bar, so nearly every environment falls at some point. Demotion is -0.10 per fall and promotion +0.05 per clean segment, so at a 50-100% fall rate everything slides to the floor within 150 iterations and stays.
+- **Verdict**: WORSE. The run is training a crawler. The curriculum is technically working as specified and the specification is wrong.
+- **Learned, and this is the general lesson**: a curriculum floor is a promise about the *easiest command you are willing to train on*. `difficulty_min = 0.5` gives a median command of 0.37 m/s, and we have already proved at length that a policy asked to crawl learns to crawl. **The floor must never sit below a command worth practising.** At 0.7 the median is 0.49; at 0.85 it is 0.60.
+- **Also wrong**: promote +0.05 against demote -0.10 needs two clean segments per fall just to hold station. That is unreachable when a fall is likely in any 20 s window.
+- **Not yet fixed.** Candidate: `difficulty_min` 0.5 → 0.75 and symmetric promote/demote, or demote only after two consecutive failures. One at a time.
+
+### E19  2026-08-14  FastTD3 groundwork (no run yet)
+- **Change**: new off-policy algorithm alongside PPO, on branch `fasttd3`. Env, reward, obs, model untouched.
+- **Why**: PPO discards every transition after a few gradient steps. Physics is 57.4% of our iteration time, so sample efficiency is the lever, not a faster chip.
+- **Prediction**: not yet run. Head-to-head against PPO on the same task once the CPU frees.
+- **Result**: 11 correctness tests pass. Oracle rejected the first value support before any compute (see below).
+- **Verdict**: n/a, groundwork only.
+- **Learned**: sizing a distributional critic's support from *measured* reward (3.27/step) was wrong; the reward *weights* allow 6.4/step, so reachable return is 640 not 327. A short support saturates every good state on the top atom and the critic goes blind while its loss looks perfect.
+
+### E18  2026-08-14  Episode length 8 s → 20 s
+- **Change**: `max_episode_steps` 1000 → 2500. Also `amp.yaml` 600 → 2500, `tracking.yaml` 300 → 750.
+- **Why**: the comment said "20 s at 50 Hz". We run 125 Hz, so 1000 steps was 8.0 s. Copied from legged_gym without converting for a 2.5x faster control loop.
+- **Second effect**: `command_hold_range` is 8-12 s, *longer than the whole episode*, so the command never changed mid-walk. About 0.8 commands per episode against legged_gym's 2.
+- **Verdict**: BUG FIXED. Not comparable across the change: surviving is now a 2.5x harder bar.
+- **Also rescaled**: abort rules 1/2/6 are raw step counts (250→625, 500→1250, 400→1000).
+
+### E17  2026-08-14  Difficulty curriculum re-enabled
+- **Change**: `difficulty_init` 1.0 → 0.7, `difficulty_min` 1.0 → 0.5, `promote_gait_match` 0.80 → 0.68.
+- **Why**: E14 raised the envelope in one jump and the policy oscillated between tracking speed and falling. legged_gym, KSLC and ALMI all expand the range only when tracking reward exceeds 0.8 of its maximum. Our machinery existed and was switched off.
+- **The justification for switching it off was wrong**: it read "the references train their full range from scratch". True, but XBot-L's full range is `[-0.3, 0.6]` m/s. Ours reaches 1.5.
+- **Prediction**: difficulty median rises off 0.70; falls lower than the control at equal ratio.
+- **Result**: running (`runs/curriculum-20260814-125526`).
+- **Caught before launch**: `promote_gait_match = 0.80` was unreachable (measured 0.66-0.73), which would have pinned difficulty at 0.70 all run and looked like the curriculum simply not working.
+
+### E16  2026-08-14  Eval selection bias  **(the big one)**
+- **Found**: `evaluate()` stopped after the first 32 of 64 episodes finished. Under autoreset those are the SHORT ones, i.e. the falls. Survivors only counted when enough truncated together.
+- **Signature**: sample size correlates with the reported fall rate. Over 101 evals: `fall_rate 1.00` with 32-34 episodes (85 evals), `fall_rate 0.31` with 64-71 (16 evals). Two modes, nothing between.
+- **Re-scored the same checkpoints**: iteration 700 logged 100% falls / return 1216, actually **33% / 2224**. Iteration 900 logged 100% / 955, actually **73% / 1622**.
+- **Verdict**: BUG FIXED, count one episode per environment.
+- **Invalidated**: every fall rate and episode length in project history, and every `best.pt` choice (returns read ~2700 in the lucky mode vs ~1000 otherwise, a gap larger than any real quality difference).
+- **Guard added**: abort rule 7 watches for sample size correlating with fall rate.
+
+### E15  2026-08-14  Velocity-scaled reward targets — measured, then dropped
+- **Change proposed**: scale `target_height` and `swing_height_target` with commanded speed, per KSLC.
+- **Measured on our own mocap first**: pelvis height `0.902 + 0.012*speed` (moves 1.7 cm, and *upward*). Mean swing clearance `0.063 + 0.020*speed`, worth ≤0.03/step at weight -20.
+- **Verdict**: NO EFFECT expected, not implemented. Only the constant was corrected, 0.08 → 0.09.
+- **Trap recorded**: measured as *peak* swing height the slope is 4x larger (`0.090 + 0.085*speed`) and implies a 0.30/step penalty that looks like a smoking gun. The reward penalises every airborne step, not the apex, so the mean is the matching statistic.
+
+### E14  2026-08-14  Command envelope  **(largest single win so far)**
+- **Change**: `lin_vel_y_range` ±0.4 → ±0.6, `lin_vel_x_range` -0.5 → -0.8, new `forward_bias_prob 0.4` over a 30° cone.
+- **Why**: median moving command was **0.38 m/s**. Human walking is 1.2-1.4, our mocap 0.52-1.24. The policy was tracking its command faithfully; the command was a crawl. The lateral value is the ellipse's semi-axis, so it crushed reach at *every* off-axis heading.
+- **Prediction**: `eval/commanded_speed` rises well past the 0.36-0.45 all previous runs sat at.
+- **Result**: median command 0.38 → 0.70; in-clip-range 17% → 70%; forward ≥1.0 m/s 4.6% → 20.2%. Policy speed 0.40 → **0.78 m/s**, stride 0.11 → 0.30 m.
+- **Verdict**: WORKED, and it also explains E08: only 17% of commands landed in the clip range, so the discriminator was shown a crawl and correctly called it fake.
+- **Cost**: torso upright fell 0.77 → 0.54. It got faster by leaning.
+
+### E13  2026-08-14  Cadence range
+- **Change**: `gait_frequency_range` (1.0, 2.0) → (0.7, 1.1) Hz.
+- **Why**: 1.0-2.0 Hz commands 2-4 foot strikes/s against a human 1.6-2.0. The policy delivered 2.91, i.e. obeying. Stride is then forced arithmetic: speed / strike rate.
+- **Result**: step rate 2.91 → 2.06, stride 0.11 → 0.20 m. Speed 0.32 → 0.40.
+- **Verdict**: WORKED, partially. Stride still far from 0.6-0.8, which led to E14.
+
+### E12  2026-08-13  Max stance width penalty
+- **Change**: `feet_distance_max = 0.45`, penalty on exceeding it.
+- **Why**: XBot rewards a band (min AND max); only the minimum was ported. The policy stood 0.67 m wide because nothing opposed splaying, and splaying is free stability.
+- **Result**: stance width 0.67 → 0.34-0.40 m. Stride unchanged at 0.11.
+- **Verdict**: WORKED for stance, NO EFFECT on stride.
+
+### E11  2026-08-13  Ablation, first attempt
+- **Verdict**: INVALID. Six of seven arms were byte-identical because `amp.yaml` has no `task:` section and an AMP run reads `amp_task:`. The giveaway was results being *identical* rather than merely similar.
+- **Fixed**: `TASK_SECTION` retargeting in `scripts/ablate.py`, plus an Oracle check.
+
+### E10  2026-08-13  Critic quality misdiagnosed
+- **Verdict**: INVALID measurement. `explained_variance` reduced to `1 - Var(A)/Var(V+A)` because `returns = advantages + values`. Read +0.95 where the honest value was +0.72. Also measured against the deterministic policy when the critic fits the noisy one.
+
+### E09  2026-08-13  Conformance audit against shipped code
+- **Why**: prompted by "why can't you just go learn publicly available code that works".
+- **Changes**: `w_torque` -1e-5 (XBot scale), `w_dof_vel` -1e-4, `w_dof_acc` -1e-7, `w_orientation` -1.0, `w_swing_height` -20.0, `w_feet_distance` -3.0, `w_dof_pos_limits` -5.0.
+- **Rejected during the audit**: T1's `w_torque = -2e-4`, measured at -9.4/step against a +6.4 budget.
+- **Deferred and still open**: asymmetric actor-critic. The actor is blind to base linear velocity, which the references give the critic as privileged information. Named the #1 sim2real divergence.
+
+### E08  2026-08-13  AMP from a non-walking policy
+- **Result**: discriminator accuracy 0.53 → 0.98 in 97 iterations, `acc_real` pinned at 1.00, gradient penalty collapsed 4.67 → 0.65, style reward FELL 0.54 → 0.31 while task return rose. Slowing the discriminator 4x only delayed it to iteration 233.
+- **Feature-level diagnosis**: overall real-vs-policy separability only 0.28 with no dominant artifact, most separable feature the neck. The discriminator was correctly reporting that the policy does not move like a person.
+- **Verdict**: WORSE. AMP polishes a walk into a human walk; it does not turn a shuffle into a walk.
+
+### E07  2026-08-13  Heading term unlearnable
+- **Found**: the command's third component is a turn RATE, so "0" never meant "keep facing that way". The integrated target spun away and the error was uniformly random (sin/cos variance 0.5000, i.e. exactly chance).
+- **Fixed**: XBot heading command, target direction drawn with the command, yaw rate recomputed each step from the wrapped error.
+
+### E06  2026-08-13  Observation normaliser froze
+- **Found**: `RunningMeanStd.COUNT_MAX = 1e6` meant a warm-started policy's normaliser drifted 50x faster than the statistics it was meant to track.
+
+### E05  2026-08-13  Exploration noise was frozen
+- **Found**: all 28 `log_std` components sat above `log_std_max`. `torch.clamp` passes no gradient outside its range, so the parameter was a gradient sink for 610 iterations.
+- **Fixed**: in-place clamp after the optimiser step.
+
+### E04  2026-08-13  Gait rhythm clock
+- **Change**: Siekmann periodic reward composition, `w_gait_phase 1.0`, frequency coupled to speed by Inman's square-root law.
+- **Why**: a human watching a video said it "walks like a horse". Measured: it swapped which foot led 0.42 times a second against 7.4 foot strikes. In a real walk those are equal.
+- **Verdict**: WORKED on rhythm.
+
+### E03  2026-08-13  Symmetry loss as a reward penalty
+- **Verdict**: WORSE. The term is zero for any policy whose output ignores its input, so "hold a symmetric pose" is a global optimum, and PPO found it: a 61 cm two-footed brace, both feet loaded 90% of the time, 6 cm of travel per foot strike.
+- **Replaced with**: mirror data augmentation. Reflecting a transition of a symmetric body gives a genuine transition, so it is unbiased, and a constant symmetric policy earns no return on either copy.
+
+### E02  2026-08-13  `gait_symmetry` was gameable
+- **Found**: defined as `min(left,right)/max(left,right)` over *stance* fraction, which is 1.0 for a humanoid standing on both feet. A policy under symmetry pressure scored 0.91 while taking no steps.
+- **Fixed**: defined over SWING time, so never lifting a foot scores 0.
+
+### E01  2026-08-13  Every video was 0.4x slow motion
+- **Found**: 125 Hz physics encoded at 50 fps. Every video in the project's history played at 40% speed.
+- **Invalidated**: every visual gait judgement made before it.
