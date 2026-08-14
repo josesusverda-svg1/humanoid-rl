@@ -118,6 +118,14 @@ class FastTD3Config:
     #: Environment steps collected before any gradient step, so the first batch is not drawn
     #: from a nearly empty buffer.
     learning_starts: int = 10
+    #: Overlap environment collection with gradient updates, on a background thread.
+    #:
+    #: Phase 0 measured that CPU physics and Metal updates barely interfere (CPU keeps
+    #: 91.5%, GPU 100.3% when concurrent), yet every trainer here alternates them strictly.
+    #: Overlapping costs max(physics, gradients) instead of the sum. Only legal off-policy:
+    #: PPO must stop the world at every update because it needs on-policy data.
+    #: See humanoid_rl/algos/async_collector.py.
+    async_collection: bool = False
 
 
 def _mlp(inp: int, hidden: tuple[int, ...], out: int, layer_norm: bool) -> nn.Sequential:

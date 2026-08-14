@@ -113,7 +113,7 @@ domain_rand:
   push_interval_s: 5.0
   push_vel_xy: 0.7
 eval:
-  interval_iterations: 500
+  interval_iterations: 250
   num_episodes: 32
   num_envs: 64
   video_every_n_evals: 5

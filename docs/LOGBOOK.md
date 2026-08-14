@@ -81,6 +81,22 @@ AMP readiness: **NOT ready**. Passes "stays up", fails "obeys speed" (0.58 vs 0.
 
 Newest first. `E##  date  what changed`.
 
+### E21  2026-08-14  Async collector: overlap physics and gradients
+- **Change**: `humanoid_rl/algos/async_collector.py`. Environment stepping moves to a background thread; the learner owns the replay buffer exclusively and the actor holds a policy snapshot. Enabled by `fasttd3.async_collection`.
+- **Why**: Phase 0 measured that CPU physics and Metal updates barely interfere (CPU keeps 91.5%, GPU 100.3% concurrent), yet every trainer alternated them strictly. Only legal off-policy; PPO must stop the world for on-policy data.
+- **Prediction** (before the run): overlap should give `max(physics, gradients)` instead of the sum, so up to 1.17x at replay ratio 16 and 1.75x at ratio 2.
+- **Result**, four arms all at exactly 1.23M env steps:
+
+| replay ratio | sync | async | gain | vs theory |
+|---|---|---|---|---|
+| 16 | 12,244 sps | 13,158 sps | +7% | 92% of the 1.17x available |
+| 2 | 45,927 sps | 61,386 sps | +34% | 76% of the 1.75x available |
+
+- **Verdict**: WORKED, and smaller than it first appeared. Overlap pays in proportion to how BALANCED the two sides are. At ratio 16 the GPU takes 295 ms against physics' 49, so there is only 14% to reclaim no matter how good the implementation is.
+- **Bug caught in my own benchmark**: the first async arm reported 55,262 sps, a 4.5x "speedup". It was fake. `drain()` took the whole queued backlog, so the actor ran 8x ahead of the learner and the configured replay ratio of 16 silently became 1.9. The giveaway was the step counts not matching: 13.4M env steps against the sync arm's 1.6M for the same 400 iterations. Fixed by taking exactly the requested steps and shortening the queue to 4 for backpressure.
+- **Learned**: throughput comparisons between RL configurations are meaningless unless the replay ratio is pinned and verified afterwards. Ratio is not a tuning detail, it is the axis the whole comparison sits on.
+- **Open, and now the important question**: ratio 2 async runs at 61,386 sps, faster than PPO's 50,244 while still reusing every transition twice. Whether ratio 2 LEARNS as well per environment step as ratio 16 is untested here and the FastTD3 paper argues the opposite. That is the next experiment.
+
 ### E20  2026-08-14  Curriculum collapsed to its floor  **(live, and my own fault)**
 - **What happened**: difficulty went 0.70 → 0.67 → 0.52 → **0.50 (floor) by iteration 150** and has been pinned there for 500 iterations. Commanded speed fell to 0.36-0.40 m/s, which is exactly the crawl E14 existed to fix.
 - **Cause**: I shipped E17 (curriculum on) and E18 (episodes 8 s → 20 s) in the SAME run, against my own one-variable rule. Twenty-second episodes make "survive without falling" a 2.5x harder bar, so nearly every environment falls at some point. Demotion is -0.10 per fall and promotion +0.05 per clean segment, so at a 50-100% fall rate everything slides to the floor within 150 iterations and stays.
