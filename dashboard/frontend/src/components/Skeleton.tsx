@@ -112,6 +112,15 @@ function View({
 export function Skeletons({ runId }: { runId: string | null }) {
   const [list, setList] = useState<CaptureInfo[]>([])
   const [index, setIndex] = useState(0)
+  // null means "follow the newest capture". A number means the viewer deliberately scrubbed
+  // back to that one and should be left there.
+  //
+  // The previous rule was `setIndex(i => i >= data.length - 1 ? data.length - 1 : i)`, which
+  // reads as "stick to the newest" and does the opposite on first load: index starts at 0,
+  // so `0 >= length - 1` is false for any list longer than one and it pins to the OLDEST
+  // capture. It only ever followed the newest if you had already dragged to the end
+  // yourself, which is exactly the dragging this was supposed to remove.
+  const [pinned, setPinned] = useState<number | null>(null)
   const [capture, setCapture] = useState<Capture | null>(null)
   const [frame, setFrame] = useState(0)
   const [playing, setPlaying] = useState(true)
@@ -127,8 +136,10 @@ export function Skeletons({ runId }: { runId: string | null }) {
       const data = (await res.json()) as CaptureInfo[]
       if (cancelled) return
       setList(data)
-      // Stick to the newest capture as the run produces more of them.
-      setIndex((i) => (i >= data.length - 1 ? Math.max(0, data.length - 1) : i))
+      // Follow the newest unless the viewer has pinned an older one.
+      setIndex(pinned === null
+        ? Math.max(0, data.length - 1)
+        : Math.min(pinned, Math.max(0, data.length - 1)))
     }
     load()
     const poll = setInterval(load, 15000)
@@ -136,7 +147,7 @@ export function Skeletons({ runId }: { runId: string | null }) {
       cancelled = true
       clearInterval(poll)
     }
-  }, [runId])
+  }, [runId, pinned])
 
   const current = list[index]
   useEffect(() => {
@@ -224,11 +235,24 @@ export function Skeletons({ runId }: { runId: string | null }) {
           max={Math.max(0, list.length - 1)}
           value={index}
           disabled={list.length < 2}
-          onChange={(e) => setIndex(Number(e.target.value))}
+          onChange={(e) => {
+            const next = Number(e.target.value)
+            setIndex(next)
+            // Dragging to the far right means "keep up with the run" rather than "pin the
+            // capture that happens to be last right now".
+            setPinned(next >= list.length - 1 ? null : next)
+          }}
         />
         <span className="skel-when">
           iteration <strong>{current?.iteration.toLocaleString()}</strong> · {steps} ·{' '}
           {index + 1} of {list.length}
+          {pinned === null
+            ? <em className="skel-live"> · live</em>
+            : (
+              <button className="skel-jump" onClick={() => setPinned(null)}>
+                jump to newest
+              </button>
+            )}
         </span>
       </div>
       {list.length < 2 && (
