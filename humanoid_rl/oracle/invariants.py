@@ -626,6 +626,96 @@ def curriculum_floor_is_worth_training_on(config) -> list[Finding]:
         f"floor {task.difficulty_min} commands a median {floor_median:.2f} m/s")]
 
 
+@check
+def getup_hold_and_thresholds_are_reachable(config) -> list[Finding]:
+    """The get-up hold, episode length and force thresholds must be mutually satisfiable.
+
+    Four independent specifications have to agree here and nothing in the code forces them to:
+    the hold duration (seconds), the control rate (physics timestep x decimation), the episode
+    limit (steps), and the domain randomisation mass range. Each has been an independent
+    source of failure in this project.
+    """
+    import numpy as np
+
+    if getattr(config.run, "task", "") != "getup":
+        return []
+    cfg = config.getup
+    out: list[Finding] = []
+
+    # 1. The hold must be an exact number of control steps. E18: a step count copied from a
+    # 50 Hz reference silently became 8 s on our 125 Hz loop while every comment said 20 s.
+    from humanoid_rl.envs.model_prep import prepare
+
+    prepared = prepare(Path(__file__).resolve().parents[2] / config.env.model_path)
+    dt = float(prepared.model.opt.timestep) * config.env.decimation
+    steps = cfg.hold_seconds / dt
+    if abs(steps - round(steps)) > 1e-6:
+        out.append(Finding(
+            Severity.SUSPECT, "hold duration",
+            f"hold_seconds {cfg.hold_seconds} is {steps:.2f} control steps at {1/dt:.0f} Hz, "
+            f"not a whole number.",
+            remedy=f"Use a multiple of {dt:.4f} s.",
+        ))
+
+    # 2. The episode must be long enough to fail, recover and still hold. An episode barely
+    # longer than the hold makes success a matter of where the reset happened to land.
+    if config.env.max_episode_steps < 3 * round(steps):
+        out.append(Finding(
+            Severity.CONTRADICTION, "episode vs hold",
+            f"episode is {config.env.max_episode_steps} steps and the hold needs "
+            f"{round(steps)}. Less than 3x leaves no room to get up, be shoved, and recover.",
+            remedy=f"Set max_episode_steps to at least {3 * round(steps)}.",
+        ))
+
+    # 3. The foot-force thresholds are fractions of NOMINAL weight, but domain randomisation
+    # scales real mass. At the light end a genuine stand must still clear them, or U becomes
+    # unsatisfiable on part of the model pool and the policy is being asked for the impossible.
+    light = min(config.domain_rand.mass_scale_range) if config.domain_rand.enabled else 1.0
+    if cfg.u_force_total_bw >= light:
+        out.append(Finding(
+            Severity.CONTRADICTION, "foot force vs mass randomisation",
+            f"u_force_total_bw {cfg.u_force_total_bw} is not below the lightest sampled mass "
+            f"scale {light}. A real stand on a light model cannot satisfy it.",
+            remedy=f"Keep u_force_total_bw below {light:.2f}, or narrow mass_scale_range.",
+        ))
+    if 2.0 * cfg.u_force_min_bw > cfg.u_force_total_bw + 1e-9:
+        out.append(Finding(
+            Severity.CONTRADICTION, "foot force split",
+            f"2 x u_force_min_bw ({2*cfg.u_force_min_bw}) exceeds u_force_total_bw "
+            f"({cfg.u_force_total_bw}), so the per-foot floor implies more than the total.",
+            remedy="Set u_force_min_bw below half of u_force_total_bw.",
+        ))
+
+    # 4. The pose bank must exist and match this model. A stale artefact is a live hazard
+    # here: this repo already has a directory named ABANDONED-staleClips-tracking.
+    bank = Path(__file__).resolve().parents[2] / cfg.bank_path
+    if not bank.exists():
+        out.append(Finding(
+            Severity.CONTRADICTION, "pose bank",
+            f"no fallen-pose bank at {cfg.bank_path}",
+            remedy="python scripts/generate_fallen_poses.py",
+        ))
+    else:
+        data = np.load(bank, allow_pickle=False)
+        if int(data["nq"]) != prepared.model.nq:
+            out.append(Finding(
+                Severity.CONTRADICTION, "pose bank",
+                f"bank nq {int(data['nq'])} against model nq {prepared.model.nq}",
+                remedy="Rebuild the bank for this model."))
+        else:
+            floor = float((data["generator"] != "standing").mean())
+            if floor < 0.5:
+                out.append(Finding(
+                    Severity.SUSPECT, "pose bank",
+                    f"only {floor:.0%} of the bank is on the floor; the task is mostly "
+                    f"resetting into a stand it does not have to earn."))
+
+    return out or [Finding(
+        Severity.OK, "getup setup",
+        f"hold {round(steps)} steps of a {config.env.max_episode_steps}-step episode, "
+        f"force floor {cfg.u_force_total_bw} under a {light} light-mass draw")]
+
+
 def run_all(config, checkpoint: Path | None = None) -> list[Finding]:
     """Every invariant. Failures inside a check are reported, never raised."""
     findings: list[Finding] = []

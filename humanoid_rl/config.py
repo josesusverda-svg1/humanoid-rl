@@ -108,6 +108,7 @@ class LogConfig:
 
 
 from humanoid_rl.algos.fasttd3 import FastTD3Config  # noqa: E402
+from humanoid_rl.tasks.getup import GetUpConfig  # noqa: E402
 
 
 @dataclass
@@ -120,6 +121,8 @@ class Config:
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     amp: AMPConfig = field(default_factory=AMPConfig)
     amp_task: AMPLocomotionConfig = field(default_factory=AMPLocomotionConfig)
+    #: Get up off the floor and hold a stand. Selected by run.task = "getup".
+    getup: GetUpConfig = field(default_factory=GetUpConfig)
     #: Off-policy alternative to `ppo`, selected by run.algo = "fasttd3". Ignored otherwise,
     #: so a PPO run carries these defaults harmlessly and the two paths never interfere.
     fasttd3: FastTD3Config = field(default_factory=FastTD3Config)

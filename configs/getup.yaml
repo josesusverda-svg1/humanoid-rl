@@ -1,0 +1,128 @@
+run:
+  name: getup
+  seed: 0
+  device: auto
+  total_env_steps: 300000000
+  output_dir: runs
+  task: getup
+env:
+  model_path: humanoid_rl/models/humanoid_scene.xml
+  num_envs: 4096
+  num_workers: null
+  decimation: 4
+  max_episode_steps: 1000
+network:
+  actor_hidden:
+  - 512
+  - 512
+  critic_hidden:
+  - 512
+  - 512
+  activation: elu
+  init_noise_std: 0.8
+ppo:
+  horizon: 24
+  gamma: 0.99
+  gae_lambda: 0.95
+  learning_rate: 0.001
+  num_epochs: 5
+  num_minibatches: 4
+  clip_ratio: 0.2
+  value_loss_coef: 1.0
+  entropy_coef: 0.01
+  max_grad_norm: 1.0
+  clip_value_loss: true
+  bounds_loss_coef: 1.0
+  log_std_max: 5.0
+  adaptive_lr: true
+  desired_kl: 0.01
+  lr_min: 1.0e-05
+  lr_max: 0.01
+  normalize_advantage: true
+  obs_clip: 10.0
+task:
+  lin_vel_x_range:
+  - -0.8
+  - 1.5
+  lin_vel_y_range:
+  - -0.6
+  - 0.6
+  ang_vel_yaw_range:
+  - -1.0
+  - 1.0
+  forward_bias_prob: 0.4
+  forward_cone_deg: 30.0
+  zero_command_prob: 0.05
+  w_lin_vel: 1.0
+  w_ang_vel: 0.5
+  w_upright: 0.3
+  w_height: 0.3
+  w_torso_upright: 0.6
+  w_head_height: 0.3
+  w_alive: 0.5
+  w_torque: -1.0e-05
+  w_action_rate: -0.01
+  sigma_lin_vel: 0.25
+  sigma_ang_vel: 0.25
+  sigma_height: 0.02
+  target_height: 0.877
+  terminate_height: 0.55
+  max_tilt: 0.7
+  terminate_torso_upright: 0.5
+  terminate_head_ratio: 0.65
+  w_feet_air_time: 1.0
+  w_flight: -0.3
+  w_feet_slip: -0.2
+  w_gait_phase: 1.0
+  free_gait_prob: 0.0
+  gait_frequency: 0.9
+  stance_fraction: 0.6
+  w_vertical_vel: -0.8
+  w_ang_vel_xy: -0.05
+  w_lateral_vel: 0.4
+  sigma_lateral_vel: 0.05
+  w_heading: 0.5
+  sigma_heading: 0.15
+  air_time_target: 0.44
+  joint_pos_noise: 0.02
+  joint_vel_noise: 0.02
+domain_rand:
+  enabled: true
+  model_pool_size: 64
+  friction_range:
+  - 0.5
+  - 1.25
+  mass_scale_range:
+  - 0.85
+  - 1.15
+  com_offset: 0.015
+  kp_scale_range:
+  - 0.85
+  - 1.15
+  kd_scale_range:
+  - 0.85
+  - 1.15
+  armature_scale_range:
+  - 1.0
+  - 1.1
+  obs_noise_joint_pos: 0.01
+  obs_noise_joint_vel: 0.15
+  obs_noise_gravity: 0.02
+  obs_noise_lin_vel: 0.05
+  obs_noise_ang_vel: 0.1
+  push_interval_s: 5.0
+  push_vel_xy: 0.7
+eval:
+  interval_iterations: 50
+  num_episodes: 32
+  num_envs: 64
+  video_every_n_evals: 5
+  video_on_best: true
+  video_width: 640
+  video_height: 480
+  video_fps: 50
+  keep_last_videos: 12
+log:
+  checkpoint_interval_iterations: 100
+  keep_last_checkpoints: 5
+  log_interval_iterations: 1

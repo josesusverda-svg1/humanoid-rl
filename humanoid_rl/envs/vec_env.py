@@ -433,6 +433,29 @@ class ThreadedVecEnv:
             self._obs[idx, self.proprio_dim :] = self._task_obs[idx].astype(np.float32)
         _ = n1, n2
 
+    def _task_pushes(self) -> np.ndarray:
+        """Shoves the TASK asked for, independent of domain randomisation.
+
+        The get-up task uses this to disturb a hold in progress, which is what turns "held the
+        pose for 2 s" into "held it against something". Kept separate from the randomisation
+        push so it fires even with domain_rand disabled, which is exactly the configuration an
+        evaluation runs in: an anti-cheat measure that switches itself off during evaluation
+        would be measuring the wrong policy.
+        """
+        request = getattr(self.task, "push_request", None)
+        if request is None:
+            return np.empty(0, dtype=np.int64)
+        due = request()
+        if due is None or not np.any(due):
+            return np.empty(0, dtype=np.int64)
+        idx = np.flatnonzero(due).astype(np.int64)
+        speed = float(getattr(self.task.cfg, "hold_push_vel", 0.6))
+        angle = self.rng.uniform(-np.pi, np.pi, idx.size)
+        self._push_vel[idx, 0] = speed * np.cos(angle)
+        self._push_vel[idx, 1] = speed * np.sin(angle)
+        self._push_vel[idx, 2] = 0.0
+        return idx
+
     def _select_pushes(self) -> np.ndarray:
         """Tick every environment's push countdown and return those due for a shove."""
         cfg = self.dr_cfg
@@ -626,7 +649,8 @@ class ThreadedVecEnv:
         self._ep_length_out[done] = s.episode_step[done]
 
         done_idx = np.flatnonzero(done)
-        self._do_resets(done_idx, self._select_pushes())
+        self._do_resets(done_idx, np.union1d(self._select_pushes(), self._task_pushes())
+                        .astype(np.int64))
         self._ep_return[done_idx] = 0.0
 
         return StepResult(

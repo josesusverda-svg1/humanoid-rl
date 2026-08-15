@@ -192,6 +192,10 @@ class Trainer:
         kind = config.run.task
         if kind == "locomotion":
             return LocomotionTask(config.task)
+        if kind == "getup":
+            from humanoid_rl.tasks.getup import GetUpTask
+
+            return GetUpTask(config.getup)
         if kind == "amp":
             from humanoid_rl.envs.model_prep import prepare
             from humanoid_rl.motion.library import MotionLibrary
