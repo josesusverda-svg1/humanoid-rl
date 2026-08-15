@@ -192,6 +192,7 @@ class ThreadedVecEnv:
             foot_first_contact=np.zeros((n, self.n_feet), dtype=bool),
             foot_lin_vel=np.zeros((n, self.n_feet, 3)),
             torso_upright=np.ones(n),
+            torso_zaxis=np.tile(np.array([0.0, 0.0, 1.0]), (n, 1)),
             head_height_ratio=np.ones(n),
             key_body_pos=np.zeros((n, max(1, len(self.prepared.key_body_names)), 3)),
             dt=self.dt,
@@ -200,6 +201,11 @@ class ThreadedVecEnv:
         # than carrying numbers that silently go stale when the humanoid is swapped.
         if hasattr(task, "configure_for_model"):
             task.configure_for_model(self.prepared.standing_height)
+        # Wider hook for tasks that need more than the standing height (torque ceilings, the
+        # actuator->qpos map, key body layout). Kept separate so the existing narrow
+        # signature, which several tasks implement, does not change.
+        if hasattr(task, "configure_for_prepared"):
+            task.configure_for_prepared(self.prepared)
         if hasattr(task, "set_joint_limits"):
             task.set_joint_limits(self._ctrl_lo.copy(), self._ctrl_hi.copy())
         # The limits above are per-ACTUATOR; the task reads joint angles out of qpos, and on
@@ -379,6 +385,7 @@ class ThreadedVecEnv:
         s.foot_lin_vel[idx] = sens[:, self._linvel_cols].reshape(-1, self.n_feet, 3)
         if self._torso_adr >= 0:
             s.torso_upright[idx] = sens[:, self._torso_adr + 2]
+            s.torso_zaxis[idx] = sens[:, self._torso_adr:self._torso_adr + 3]
         if self._head_adr >= 0:
             s.head_height_ratio[idx] = sens[:, self._head_adr + 2] / self._standing_head
         if self._key_cols.size:

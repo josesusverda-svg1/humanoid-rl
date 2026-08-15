@@ -131,6 +131,9 @@ class PreparedModel:
     foot_linvel_adr: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
     #: Index into `data.sensordata` of the torso up-axis (3), or -1 if the model has none.
     torso_zaxis_adr: int = -1
+    #: The MJCF this was built from, so artefacts built against one model (pose banks,
+    #: retargeted clips) can refuse to load against another.
+    model_path: str = ""
     #: Index into `data.sensordata` of the head position (3), or -1 if absent.
     head_pos_adr: int = -1
     #: Start indices into `data.sensordata` of each key body's world position (3 each).
@@ -546,6 +549,7 @@ def prepare(
         foot_touch_adr=touch_adr,
         foot_linvel_adr=linvel_adr,
         torso_zaxis_adr=torso_adr,
+        model_path=str(model_path),
         head_pos_adr=head_adr,
         key_body_adr=key_adr,
         key_body_names=key_names,

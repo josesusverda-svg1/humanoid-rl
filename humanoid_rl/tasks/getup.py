@@ -1,0 +1,356 @@
+"""Get up off the floor, and stay up.
+
+The task is: start somewhere on the ground, reach a genuine human standing pose, and HOLD it.
+Falling is not failure here; it is the starting condition. See docs/GETUP.md for the full
+specification and the measurements behind every threshold.
+
+THE DESIGN IN ONE IDEA. All the anti-cheat burden lives in a hard conjunctive predicate `U`,
+and the reward only supplies a slope toward it. A conjunct has no price: it cannot be paid for
+out of another term's budget. That is precisely how this repo's earlier soft posture threshold
+failed, and how the symmetry term failed before it (a 61 cm two-footed brace scored 0.91 while
+taking no steps).
+
+THE THREE THINGS A PERSON ASKS FOR, and where each is enforced:
+
+* "not just jump up, collect points and fall" -> `stand` is paid PER STEP while `U` holds,
+  with no first-crossing bonus anywhere. One fall-and-recover cycle costs about 1.5 s of
+  transit at ~0.3/step instead of 2.5/step and gains nothing. Success additionally requires
+  the hold to have been completed AND the body to be standing when the clock runs out, so
+  "got up at t=3 s then lay down" does not count.
+* "the force must be adequate, no snapping upright with one joint" -> `U13` rejects
+  pass-through at speed, `U9` rejects being airborne, and a scripted shove of unknown
+  direction fires inside every hold attempt.
+* "it should have to work out the logic" -> `rise` is convex in head height and multiplied by
+  pelvis uprightness, so the payoff grows toward standing and parking in a kneel is a bad
+  local deal. That convexity is the single knob to steepen if a kneel is observed. Do not add
+  a term; term interactions are where this project's bugs come from.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from humanoid_rl.tasks.base import BatchState, Task
+
+
+@dataclass
+class GetUpConfig:
+    #: Seconds `U` must hold CONSECUTIVELY. Configured in seconds and converted with the real
+    #: dt at runtime: a hardcoded step count is how episodes came to be 8 s while every
+    #: comment said 20 (a 50 Hz count on a 125 Hz loop).
+    hold_seconds: float = 2.0
+    #: A shove of this speed, in a uniformly random direction, fires once inside every hold
+    #: attempt at a step drawn from this window. Redrawn whenever the counter resets, so a
+    #: policy cannot restart the counter and coast past it. Not observable, so it cannot be
+    #: pre-braced directionally.
+    hold_push_vel: float = 0.6
+    hold_push_window: tuple[int, int] = (40, 140)
+
+    # --- the standing predicate U. Thresholds measured on a settled stand, docs/GETUP.md 1.2.
+    u_root_height_frac: float = 0.85     # settled stand reads 0.995
+    u_head_ratio: float = 0.90           # settled 0.995; seated reads 0.450
+    u_pelvis_upright: float = -0.93      # gravity_body z; settled -1.000
+    u_torso_upright: float = 0.85        # inversion guard only
+    u_lean: float = 0.35                 # rad of waist fold, fore and lateral
+    u_force_total_bw: float = 0.60       # settled 1.00 BW; survives mass_scale 0.85
+    u_force_min_bw: float = 0.20         # settled 0.50 BW per foot
+    u_foot_height: float = 0.10          # m; settled 0.027
+    u_hand_height: float = 0.40          # m; settled 0.835
+    u_knee: float = 0.60                 # rad; settled 0.24
+    u_sep_min: float = 0.08
+    u_sep_max: float = 0.35              # settled 0.170
+    u_lin_speed: float = 0.40
+    u_ang_speed: float = 1.5
+
+    # --- reward weights. Total lies in [-0.35, +3.5].
+    w_upright: float = 0.5
+    w_rise: float = 1.0
+    w_stand: float = 2.0
+    w_quiet: float = 0.5
+    w_posture: float = 0.5
+    w_effort: float = -0.25
+    w_smooth: float = -0.10
+
+    #: Pose bank built by scripts/generate_fallen_poses.py.
+    bank_path: str = "data/fallen/bank_v1.npz"
+    #: Fraction of resets that start from a standing pose, so the standing terms are exercised
+    #: from iteration 1. EXCLUDED from the success denominator: without that a do-nothing
+    #: policy books this entire share as free successes.
+    standing_reset_frac: float = 0.15
+
+
+class GetUpTask(Task):
+    reward_term_names = ("upright", "rise", "stand", "quiet", "posture", "effort", "smooth")
+
+    def __init__(self, config: GetUpConfig | None = None) -> None:
+        self.cfg = config or GetUpConfig()
+        self._standing_height = 0.877
+        self._standing_head = 1.514
+        self._body_weight = 490.99
+        self._qadr = np.arange(7, 35)
+        self._knee_qadr = np.zeros(2, dtype=int)
+        self._nominal = np.zeros(28)
+        self._torque_limit = np.ones(28)
+        self._bank_q: np.ndarray | None = None
+        self._bank_v: np.ndarray | None = None
+        self._bank_is_standing: np.ndarray | None = None
+        self._rng = np.random.default_rng(0)
+        self._hold_steps_needed = 250
+        self._push_request: np.ndarray | None = None
+
+    # ------------------------------------------------------------------ setup
+
+    def configure_for_prepared(self, prepared) -> None:
+        """Take every model-derived constant from the model, and check the bank matches it."""
+        import hashlib
+
+        model = prepared.model
+        self._standing_height = float(prepared.standing_height)
+        self._standing_head = float(prepared.standing_head_height)
+        self._body_weight = float(model.body_mass.sum() * 9.81)
+        self._qadr = np.asarray(prepared.actuator_qpos_adr, dtype=int)
+        self._nominal = np.asarray(prepared.default_joint_pos, dtype=float)
+        self._torque_limit = np.abs(model.jnt_actfrcrange[:, 1])[
+            model.actuator_trnid[:, 0]].astype(float)
+        self._torque_limit[self._torque_limit <= 0.0] = 1.0
+        knees = [i for i, n in enumerate(prepared.joint_names) if "knee" in n]
+        self._knee_qadr = self._qadr[knees[:2]] if len(knees) >= 2 else self._qadr[:2]
+
+        path = Path(self.cfg.bank_path)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent.parent.parent / path
+        if not path.exists():
+            raise FileNotFoundError(
+                f"no fallen-pose bank at {path}. Build it with "
+                f"scripts/generate_fallen_poses.py")
+        bank = np.load(path, allow_pickle=False)
+        # A stale bank is a real hazard here: this repo already has a run directory named
+        # ABANDONED-staleClips-tracking. Fail loudly rather than train on the wrong body.
+        if int(bank["nq"]) != model.nq or int(bank["nv"]) != model.nv:
+            raise ValueError(f"bank has nq/nv {int(bank['nq'])}/{int(bank['nv'])}, "
+                             f"model has {model.nq}/{model.nv}")
+        sha = hashlib.sha1(Path(prepared.model_path).read_bytes()).hexdigest() \
+            if getattr(prepared, "model_path", None) else None
+        if sha is not None and str(bank["model_sha1"]) != sha:
+            raise ValueError("fallen-pose bank was built for a different model file")
+
+        train = bank["split"] == "train"
+        self._bank_q = bank["qpos"][train]
+        self._bank_v = bank["qvel"][train]
+        self._bank_is_standing = bank["generator"][train] == "standing"
+
+    @property
+    def task_obs_dim(self) -> int:
+        # Deliberately nothing. The policy sees only proprioception, which is what a real
+        # humanoid has lying on the floor. Notably hold_steps is NOT observed: a policy that
+        # can see "112 steps to go" will schedule its collapse, and one that can see the shove
+        # trigger will pre-brace against it.
+        return 0
+
+    def observe_batch(self, state: BatchState, out: np.ndarray) -> None:
+        return
+
+    def init_state(self, state: BatchState, rng: np.random.Generator) -> None:
+        n = state.num_envs
+        self._rng = rng
+        self._hold_steps_needed = max(1, int(round(self.cfg.hold_seconds / state.dt)))
+        ts = state.task_state
+        ts["hold_steps"] = np.zeros(n)
+        ts["held_ever"] = np.zeros(n, dtype=bool)
+        ts["standing"] = np.zeros(n, dtype=bool)
+        ts["push_at"] = rng.integers(*self.cfg.hold_push_window, size=n).astype(float)
+        ts["pushed"] = np.zeros(n, dtype=bool)
+        ts["from_standing"] = np.zeros(n, dtype=bool)
+        ts["prev_prev_action"] = np.zeros((n, state.action.shape[1]))
+        self._push_request = np.zeros(n, dtype=bool)
+
+    # ------------------------------------------------------------------ predicate
+
+    def _lean(self, state: BatchState) -> tuple[np.ndarray, np.ndarray]:
+        """Signed waist fold, fore and lateral, in the heading frame.
+
+        `torso_upright` is cos(tilt) and CANNOT distinguish a forward fold from a backward one.
+        That blindness already cost this project a full analysis cycle: a 48 degree backward
+        arch was diagnosed and reported as a forward lean. Anything angular here is signed.
+        """
+        z = state.torso_zaxis
+        yaw = state.heading
+        c, s = np.cos(-yaw), np.sin(-yaw)
+        fore = c * z[:, 0] - s * z[:, 1]
+        side = s * z[:, 0] + c * z[:, 1]
+        return fore, side
+
+    def _standing(self, state: BatchState) -> np.ndarray:
+        """The 13 conjuncts. All hard; none is purchasable."""
+        cfg = self.cfg
+        g = state.gravity_body
+        fz = state.key_body_pos[:, 0:2, 2]
+        hz = state.key_body_pos[:, 2:4, 2]
+        force = state.foot_force[:, :2]
+        knee = state.qpos[:, self._knee_qadr]
+        rel = state.key_body_pos[:, 0, :2] - state.key_body_pos[:, 1, :2]
+        # PLANAR separation, not the lateral component. A fore-aft split at hip_y = +-0.5 puts
+        # the feet 0.878 m apart while the lateral-only helper reports 0.142 m, so the
+        # sagittal brace would be invisible to it.
+        sep = np.linalg.norm(rel, axis=1)
+        fore, side = self._lean(state)
+        bw = self._body_weight
+
+        return (
+            (state.root_height >= cfg.u_root_height_frac * self._standing_height)
+            & (state.head_height_ratio >= cfg.u_head_ratio)
+            & (g[:, 2] <= cfg.u_pelvis_upright)
+            & (state.torso_upright >= cfg.u_torso_upright)
+            & (np.abs(fore) <= cfg.u_lean)
+            & (np.abs(side) <= cfg.u_lean)
+            # FORCE, never foot_contact: the contact flag fires at 9.82 N and is True for a
+            # supine corpse (46 N per foot). A published "standing on feet" indicator using
+            # contact evaluates True for a body lying on its back on this model.
+            & (force.sum(axis=1) >= cfg.u_force_total_bw * bw)
+            & (force.min(axis=1) >= cfg.u_force_min_bw * bw)
+            & (fz.max(axis=1) <= cfg.u_foot_height)
+            & (hz.min(axis=1) >= cfg.u_hand_height)
+            # max, not mean: a mean lets one knee at 1.0 rad be paid for by the other locked.
+            & (knee.max(axis=1) <= cfg.u_knee)
+            & (sep >= cfg.u_sep_min) & (sep <= cfg.u_sep_max)
+            & (np.linalg.norm(state.qvel[:, 0:3], axis=1) <= cfg.u_lin_speed)
+            & (np.linalg.norm(state.qvel[:, 3:6], axis=1) <= cfg.u_ang_speed)
+        )
+
+    # ------------------------------------------------------------------ reward
+
+    def reward_batch(self, state: BatchState, terms: np.ndarray) -> np.ndarray:
+        cfg = self.cfg
+        ts = state.task_state
+        U = self._standing(state)
+        ts["standing"][:] = U
+
+        # --- hold bookkeeping. This is the ONLY site that mutates it, and it runs before the
+        # termination and success callbacks, so counter, reward and success see one value.
+        # CONSECUTIVE: hard reset to zero on any miss, never decayed. A cumulative counter is
+        # satisfied by 250 separate one-step flashes, which IS the jump-collect-fall cheat.
+        ts["hold_steps"] = np.where(U, ts["hold_steps"] + 1.0, 0.0)
+        reset_now = ~U & (ts["hold_steps"] == 0.0)
+        if reset_now.any():
+            ts["push_at"][reset_now] = self._rng.integers(
+                *cfg.hold_push_window, size=int(reset_now.sum()))
+            ts["pushed"][reset_now] = False
+        ts["held_ever"] |= ts["hold_steps"] >= self._hold_steps_needed
+
+        # The shove: fires once per hold attempt, at an unannounced step.
+        due = U & ~ts["pushed"] & (ts["hold_steps"] >= ts["push_at"])
+        ts["pushed"] |= due
+        self._push_request = due
+
+        upright = np.clip(-state.gravity_body[:, 2], 0.0, 1.0)
+        # Head height clipped at 1.0, so throwing the head ABOVE standing height pays nothing.
+        # Measured: a 3 m/s launch reaches head_ratio 1.30, and tiptoe already reads 1.008.
+        h = np.clip(state.head_height_ratio, 0.0, 1.0)
+        # Convex in h and multiplied by pelvis uprightness: height bought by diving or
+        # handstanding pays nothing, and the marginal payoff grows toward standing, so parking
+        # in a kneel is a bad deal. This convexity is the knob to steepen if a kneel appears.
+        rise = upright * (np.expm1(3.0 * h) / np.expm1(3.0))
+
+        v = np.linalg.norm(state.qvel[:, 0:3], axis=1)
+        w = np.linalg.norm(state.qvel[:, 3:6], axis=1)
+        joint_err = state.qpos[:, self._qadr] - self._nominal
+
+        terms[:, 0] = cfg.w_upright * upright
+        terms[:, 1] = cfg.w_rise * rise
+        terms[:, 2] = cfg.w_stand * U
+        # quiet and posture are GATED ON U. Ungated, a stillness term is maximised by a
+        # motionless body on the floor, and this repo has shipped that exact bug twice.
+        terms[:, 3] = cfg.w_quiet * U * np.exp(-(v ** 2) / 0.25 - (w ** 2) / 4.0)
+        terms[:, 4] = cfg.w_posture * U * np.exp(-np.sum(joint_err ** 2, axis=1) / 2.0)
+        ratio = np.clip(np.abs(state.torque) / self._torque_limit, 0.0, 2.0)
+        terms[:, 5] = cfg.w_effort * np.mean(ratio ** 2, axis=1) / 4.0
+        jerk = state.action - 2.0 * state.prev_action + ts["prev_prev_action"]
+        terms[:, 6] = cfg.w_smooth * np.mean(jerk ** 2, axis=1) / 16.0
+        ts["prev_prev_action"][:] = state.prev_action
+
+        # NOT clipped at zero, unlike LocomotionTask. That clip is affordable there because
+        # the positive budget is ~6/step; here a prone policy's positive budget is ~0/step, so
+        # the clip would bind on most steps and erase the penalty gradient entirely. The
+        # bounds make it unnecessary: worst penalty 0.35/step against a rise gain up to 1.5.
+        return terms.sum(axis=1)
+
+    def terminated_batch(self, state: BatchState) -> np.ndarray:
+        # No early termination at all. Falling is the starting condition, so terminating on it
+        # would end the episode before the task begins. NaN guard only.
+        return ~np.isfinite(state.qpos).all(axis=1)
+
+    def success_batch(self, state: BatchState) -> np.ndarray:
+        ts = state.task_state
+        # BOTH halves. held_ever alone scores "stood at t=3 s, then lay down for 7 s", which is
+        # a real published failure. Standing-at-the-end alone scores one upright frame at the
+        # buzzer. Standing resets are masked out: they would be free successes.
+        return ts["held_ever"] & ts["standing"] & ~ts["from_standing"]
+
+    def on_batch_end(self, state: BatchState, metrics: dict[str, float]) -> dict[str, float]:
+        return metrics
+
+    def push_request(self) -> np.ndarray | None:
+        """Environments that should be shoved this step, for the engine's push machinery."""
+        return self._push_request
+
+    # ------------------------------------------------------------------ resets
+
+    def reset_batch(self, state: BatchState, idx: np.ndarray,
+                    rng: np.random.Generator) -> None:
+        ts = state.task_state
+        ts["hold_steps"][idx] = 0.0
+        ts["held_ever"][idx] = False
+        ts["standing"][idx] = False
+        ts["pushed"][idx] = False
+        ts["push_at"][idx] = rng.integers(*self.cfg.hold_push_window, size=idx.size)
+        ts["prev_prev_action"][idx] = 0.0
+
+    def reset_pose(self, state: BatchState, idx: np.ndarray, rng: np.random.Generator):
+        """Draw from the bank. Always returns a pose for EVERY resetting environment.
+
+        `_has_reset_pose` in the engine is a single global bool: if this returns non-None then
+        every resetting row reads the array. The standing mix therefore cannot be expressed by
+        returning None for some rows; those rows carry standing poses drawn from the bank.
+        """
+        if self._bank_q is None:
+            return None
+        pick = rng.integers(0, len(self._bank_q), size=idx.size)
+        # Honour the configured standing fraction by re-drawing from the two sub-pools.
+        want_stand = rng.random(idx.size) < self.cfg.standing_reset_frac
+        stand_pool = np.flatnonzero(self._bank_is_standing)
+        floor_pool = np.flatnonzero(~self._bank_is_standing)
+        if stand_pool.size and floor_pool.size:
+            pick = np.where(want_stand,
+                            stand_pool[rng.integers(0, stand_pool.size, idx.size)],
+                            floor_pool[rng.integers(0, floor_pool.size, idx.size)])
+        state.task_state["from_standing"][idx] = self._bank_is_standing[pick]
+        return self._bank_q[pick].copy(), self._bank_v[pick].copy()
+
+    def reset_noise(self, state: BatchState, idx: np.ndarray, rng: np.random.Generator):
+        # None. Additive noise on top of a settled pose breaks the contact state that made it
+        # a valid fixed point of the reset path in the first place.
+        return None
+
+    # ------------------------------------------------------------------ metrics
+
+    def eval_metrics(self, state: BatchState) -> dict[str, float]:
+        ts = state.task_state
+        real = ~ts["from_standing"]
+        denom = max(int(real.sum()), 1)
+        return {
+            "standing_frac": float(ts["standing"][real].mean()) if real.any() else 0.0,
+            "held_ever_frac": float(ts["held_ever"][real].sum() / denom),
+            # Got up and then lost it. UniReLo's Time-to-Fall failure, reported separately so
+            # it cannot hide inside the success rate.
+            "time_to_fall_frac": float(
+                (ts["held_ever"] & ~ts["standing"] & real).sum() / denom),
+            "hold_progress": float(ts["hold_steps"][real].mean() / self._hold_steps_needed)
+            if real.any() else 0.0,
+            "head_height_ratio": float(state.head_height_ratio.mean()),
+            "root_height": float(state.root_height.mean()),
+            "pelvis_upright": float(np.clip(-state.gravity_body[:, 2], 0.0, 1.0).mean()),
+            "from_standing_frac": float(ts["from_standing"].mean()),
+        }

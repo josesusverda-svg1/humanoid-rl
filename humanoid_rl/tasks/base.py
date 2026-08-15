@@ -96,6 +96,14 @@ class BatchState:
     #: humanoid can hold its pelvis level while folding its torso flat, and this is the
     #: term that notices.
     torso_upright: np.ndarray
+    #: (N, 3) the torso's own z-axis in WORLD coordinates.
+    #:
+    #: `torso_upright` is only this vector's z component, i.e. cos(tilt), which is SIGN-BLIND:
+    #: a 48 degree forward stoop and a 48 degree backward arch give the identical number. That
+    #: blindness cost this project a full analysis cycle, during which a backward fold was
+    #: diagnosed, reported and nearly "fixed" as a forward lean. Any task that cares which way
+    #: the torso is bent must use this and rotate it into the heading frame.
+    torso_zaxis: np.ndarray
     #: (N,) world height of the head, normalised against its standing height.
     head_height_ratio: np.ndarray
     #: (N, n_key, 3) world positions of the key bodies (feet and hands). Used by the
