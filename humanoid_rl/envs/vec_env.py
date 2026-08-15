@@ -509,6 +509,28 @@ class ThreadedVecEnv:
                 self._reset_qpos_noise, self._reset_qvel_noise = noise
                 self._has_reset_noise = True
 
+        # Seed the servo targets from the pose the humanoid is actually being reset INTO,
+        # rather than from the standing pose.
+        #
+        # Both `s.ctrl` and `_ctrl_filtered` were set to `_default_joint_pos` above, which is
+        # correct while every reset is a stand: the target equals the pose and the first step
+        # demands nothing. It becomes badly wrong the moment a task resets into a pose on the
+        # floor, because step 1 then commands a STANDING configuration to a body lying down.
+        # Measured over 24 settled fallen poses, the first control step demands a mean
+        # |torque| of 92.8 N.m peaking at 1002 N.m, with 6.5 of 28 joints pinned at their
+        # ceiling. Seeding from the reset pose's own angles gives 1.47 N.m mean and 11.1 N.m
+        # peak: a 63x reduction. Without this the opening 100 ms of every fallen episode is a
+        # full-torque convulsion the policy never chose, and any analysis of how a get-up
+        # begins would be studying the engine rather than the policy.
+        #
+        # Indexed through actuator_qpos_adr, never qpos[7:]: see E25, hip_y and hip_z are
+        # transposed on both legs and a naive slice silently swaps four servo targets.
+        if self._has_reset_pose and done_idx.size:
+            rows = self._reset_row[done_idx]
+            joints = self._reset_qpos_abs[rows][:, self.prepared.actuator_qpos_adr]
+            s.ctrl[done_idx] = joints
+            self._ctrl_filtered[done_idx] = joints
+
         self._run_phase(_PHASE_RESET)
 
         self._compute_derived(done_idx)

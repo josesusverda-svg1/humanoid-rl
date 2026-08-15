@@ -405,6 +405,7 @@ def prepare(
     gains: dict[str, tuple[float, float]] | None = None,
     pose: dict[str, float] | None = None,
     action_scale_fraction: float = 0.6,
+    action_scale_mode: str = "fraction",
     gain_scale: float | None = None,
 ) -> PreparedModel:
     """Load an MJCF and return it configured for position-controlled RL.
@@ -413,6 +414,9 @@ def prepare(
         model_path: Path to the scene XML (body plus ground).
         gains: Regex-to-(kp, kv) map. Defaults to DEFAULT_GAINS.
         pose: Joint-name-to-angle nominal pose. Defaults to DEFAULT_POSE.
+        action_scale_mode: "fraction" (default, unchanged behaviour) or "full_range", which
+            lets a full-scale action reach either end of the joint's travel. Needed for poses
+            like kneeling that the fraction mode cannot express at all.
         action_scale_fraction: Fraction of each joint's half-range that a full-scale
             action (+-1) may command as an offset from the nominal pose. Scaling per joint
             rather than using one global constant matters because ranges differ by 4x
@@ -439,7 +443,26 @@ def prepare(
         lo, hi = model.jnt_range[joint_id]
         if model.jnt_limited[joint_id]:
             angle = float(np.clip(angle, lo, hi))
-            action_scale[i] = action_scale_fraction * (hi - lo) * 0.5
+            if action_scale_mode == "full_range":
+                # Half-width taken about the NOMINAL angle rather than about the range
+                # centre, so a = 0 still means the nominal pose exactly and every existing
+                # policy's zero action is unchanged, while a = +-1 can now reach either end
+                # of the joint's travel.
+                #
+                # Why this mode exists. In "fraction" mode a full-scale action moves a joint
+                # only 0.6 of its half-range, which covers 56% of joint travel on average and
+                # just 37.5% of the knee (reachable 1.05 rad of a 2.79 rad range). Kneeling
+                # needs about 2.4 rad and all-fours about 2.4, so a get-up is not merely hard
+                # to learn, it is INEXPRESSIBLE: the policy cannot command the pose at all,
+                # and can only be pushed there by contact while the servo pulls back with up
+                # to 200 N.m. Walking never revealed this because walking never needs it.
+                #
+                # The cost is resolution: the knee's commandable band widens 3.1x, so the
+                # same action precision buys 3.1x coarser angles. That trade has to be
+                # re-measured against a dumb-controller baseline whenever gains change.
+                action_scale[i] = max(angle - lo, hi - angle)
+            else:
+                action_scale[i] = action_scale_fraction * (hi - lo) * 0.5
         else:
             action_scale[i] = action_scale_fraction
 
