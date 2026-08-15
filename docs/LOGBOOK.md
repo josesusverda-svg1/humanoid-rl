@@ -91,6 +91,26 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
 
 Newest first. `E##  date  what changed`.
 
+### E26  2026-08-15  Get-up run 1: sits up on one arm, never uses its legs
+- **Setup**: new GetUpTask, 300M steps, 1200-pose bank, 2 s hold, 13-conjunct standing predicate.
+- **Result**: got up to sitting and stopped. Best eval at iteration 2700: head 0.537, root 0.322, pelvis_upright 0.933, **standing 0.0%**, return 690 (of a ~3500 ceiling).
+- **Verdict**: WORSE than intended, and the failure was found by a person watching the video, not by any metric. Their description: "all the pressure on one hand, lifting his hip, raising one hand, drifts in circles, doesn't bend his knee."
+- **Measured, and it matched every word**:
+
+| | |
+|---|---|
+| left hand height | 0.469 m |
+| right hand height | 0.064 m |
+| at least one hand on the floor | 98% of the time |
+| BOTH hands down | 1% |
+| knee angle | 0.53 rad, max ever 1.06 (a kneel needs ~2.4) |
+| yaw drift | 58.7 deg/s, a full turn every 6 s |
+
+- **Root cause, and it is not the convexity I blamed earlier.** NOTHING in the reward required the legs to do anything. `upright` pays for pelvis verticality and `rise` for head height; a one-armed prop buys both without using a leg. The foot-force conjuncts (U7, U8) exist but gate only the STANDING terms, which pay zero for the entire approach, so the legs were irrelevant on the whole path from lying to standing. The cheapest way to raise the pelvis and head was to push with one arm, and the spin is that arm's reaction torque.
+- **Fix**: `rise` is now multiplied by foot load, ramped to full at 0.30 BW. Not a new term. This is the same device the design already uses to stop height bought by DIVING from paying (`rise` is multiplied by pelvis uprightness); the arm-propping hole was simply left open. A one-armed prop with unloaded feet now earns zero rise; the same posture with the feet under the body earns it in full.
+- **Also added**: `foot_load_bw`, `hand_height_gap`, `hands_down_frac`, `knee_max`, `spin_deg_s` to eval metrics. All five were invisible before, which is why this needed a human and a video. A defect that only a person can see is a missing metric.
+- **Lesson, general**: gating a reward on a state the policy must EARN is stronger than penalising the alternative. Every anti-cheat in this task that has held is a gate; every one that leaked was an unguarded positive.
+
 ### E25  2026-08-14  Actuator order is NOT qpos order, and two live bugs came from assuming it is
 - **Found while designing the get-up task**, by agents measuring the model rather than reading comments.
 - **The fact**: on this humanoid, actuator `i` does NOT control `qpos[7 + i]`. On both legs `hip_y` and `hip_z` are transposed, so **4 of 28 actuators** disagree with that assumption:

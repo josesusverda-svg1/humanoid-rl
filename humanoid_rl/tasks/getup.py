@@ -74,6 +74,25 @@ class GetUpConfig:
     w_effort: float = -0.25
     w_smooth: float = -0.10
 
+    #: Fraction of body weight the FEET must carry before `rise` pays in full.
+    #:
+    #: Added after a person watched a video and said "he puts all the pressure on one hand,
+    #: lifts his hip, and drifts in circles without bending a knee". Measured, and exactly
+    #: right: the left hand sat at 0.469 m while the right stayed at 0.064 m, at least one
+    #: hand was on the floor 98% of the time and both only 1%, knees never exceeded 1.06 rad
+    #: against the ~2.4 a kneel needs, and the body span a full turn every 6 s.
+    #:
+    #: The cause was a hole in the reward, not the convexity. NOTHING required the legs to do
+    #: anything. `upright` pays for pelvis verticality and `rise` for head height, and a
+    #: one-armed prop buys both without using a leg. The foot-force conjuncts existed but
+    #: gate only the STANDING terms, which pay zero for the entire approach, so the legs were
+    #: irrelevant on the whole path from lying to standing.
+    #:
+    #: The fix is the one the design already uses elsewhere rather than a new term: `rise` is
+    #: multiplied by pelvis uprightness so that height bought by diving pays nothing, and is
+    #: now also multiplied by foot load so that height bought by ARM-PROPPING pays nothing.
+    rise_foot_load_bw: float = 0.30
+
     #: Pose bank built by scripts/generate_fallen_poses.py.
     bank_path: str = "data/fallen/bank_v1.npz"
     #: Fraction of resets that start from a standing pose, so the standing terms are exercised
@@ -252,7 +271,14 @@ class GetUpTask(Task):
         # Convex in h and multiplied by pelvis uprightness: height bought by diving or
         # handstanding pays nothing, and the marginal payoff grows toward standing, so parking
         # in a kneel is a bad deal. This convexity is the knob to steepen if a kneel appears.
-        rise = upright * (np.expm1(3.0 * h) / np.expm1(3.0))
+        # Gated on the FEET carrying load, for the same reason it is gated on pelvis
+        # uprightness: height that the legs did not pay for should not be bought. Ramped
+        # rather than a hard threshold, so there is a gradient toward loading the feet at
+        # all rather than a cliff the policy has to jump.
+        foot_load = np.clip(
+            state.foot_force[:, :2].sum(axis=1)
+            / (cfg.rise_foot_load_bw * self._body_weight), 0.0, 1.0)
+        rise = upright * foot_load * (np.expm1(3.0 * h) / np.expm1(3.0))
 
         v = np.linalg.norm(state.qvel[:, 0:3], axis=1)
         w = np.linalg.norm(state.qvel[:, 3:6], axis=1)
@@ -353,4 +379,14 @@ class GetUpTask(Task):
             "root_height": float(state.root_height.mean()),
             "pelvis_upright": float(np.clip(-state.gravity_body[:, 2], 0.0, 1.0).mean()),
             "from_standing_frac": float(ts["from_standing"].mean()),
+            # The one-armed prop, made visible. Without these the failure is only findable by
+            # watching a video, which is how it was found the first time.
+            "foot_load_bw": float(state.foot_force[:, :2].sum(axis=1).mean() / self._body_weight),
+            "hand_height_gap": float(np.abs(state.key_body_pos[:, 2, 2]
+                                            - state.key_body_pos[:, 3, 2]).mean()),
+            "hands_down_frac": float(
+                (np.minimum(state.key_body_pos[:, 2, 2], state.key_body_pos[:, 3, 2]) < 0.15
+                 ).mean()),
+            "knee_max": float(state.qpos[:, self._knee_qadr].max(axis=1).mean()),
+            "spin_deg_s": float(np.degrees(np.abs(state.qvel[:, 5])).mean()),
         }
