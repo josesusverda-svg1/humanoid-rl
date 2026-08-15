@@ -52,6 +52,20 @@ print(f"\nsince the first eval:  return {g(first,'eval/episode_return'):.0f} -> 
       f"{g(last,'eval/foot_load_bw'):.2f}")
 PY
 
+# The expensive half (conjuncts + rendering) runs at most every RENDER_EVERY seconds, so a
+# frequent liveness ping stays cheap. Rendering takes ~40 s and pinning it to every call would
+# make a one-minute cadence impossible.
+RENDER_EVERY=${RENDER_EVERY:-540}
+STAMP=/tmp/getup_watch_last
+NOW=$(date +%s)
+LAST=$(cat $STAMP 2>/dev/null || echo 0)
+if [ $((NOW - LAST)) -lt $RENDER_EVERY ]; then
+  echo "\n(next frames in $(( (RENDER_EVERY - NOW + LAST) / 60 ))m; run with RENDER_EVERY=0 to force)"
+  pgrep -f "humanoid_rl.train" >/dev/null || { echo "\nTRAINING HAS FINISHED"; exit 1; }
+  exit 0
+fi
+echo $NOW > $STAMP
+
 echo "\n--- the 13 standing conjuncts, worst first (this is where it is stuck) ---"
 .venv/bin/python scripts/getup_conjuncts.py --run "$RUN" 2>/dev/null | tail -14
 

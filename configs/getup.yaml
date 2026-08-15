@@ -34,7 +34,7 @@ ppo:
   max_grad_norm: 1.0
   clip_value_loss: true
   bounds_loss_coef: 1.0
-  log_std_max: 5.0
+  log_std_max: 0.0
   adaptive_lr: true
   desired_kl: 0.01
   lr_min: 1.0e-05

@@ -91,6 +91,24 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
 
 Newest first. `E##  date  what changed`.
 
+### E30  2026-08-15  Exploration ran away and drowned the policy; the both-feet gate is untested
+- **Run**: get-up with `rise` gated on `2*min(left, right)` foot force instead of the sum.
+- **Stopped at iteration 900 by the pre-committed rule** ("torso not inverted" below 40% by iteration 1000). It was at **0.1%**.
+- **But the gate is not what failed.** Exploration std ran **0.79 -> 3.43** on an action range of [-1, 1], and eval return went **833 at iteration 300 -> 19 at iteration 900**. The policy drowned in its own noise before the gate could be judged either way.
+
+| | iteration 300 | iteration 900 |
+|---|---|---|
+| head high | 19.1% | **0.1%** |
+| torso not inverted | 5.7% | **0.1%** |
+| pelvis high | 26.2% | **0.8%** |
+| return | 833 | 19 |
+
+- **Cause**: `log_std_max = 5.0`, which is std 148 and therefore no ceiling at all, plus a positive `entropy_coef` and nothing pulling back. This is the SECOND run lost to log_std after E05, and in the opposite direction: E05 froze it above its ceiling, this let it escape.
+- **Fix**: `log_std_max` 5.0 -> 0.0, capping std at 1.0. Walking trained fine at 0.4-1.4. Verified safe: `torch.clamp` passes gradient 1.0 at exactly the boundary and 0.0 only strictly outside, and `clamp_log_std()` runs in place after every optimiser step, so the parameter can sit on the ceiling and still be pulled back down. That distinction is precisely what E05 got wrong.
+- **New Oracle check** `exploration_has_a_ceiling`, covering BOTH directions: a ceiling above std 2 is not a ceiling, and `init_noise_std` above the ceiling freezes the parameter from step one. Verified to bite on both.
+- **A defect in my own watching, worth as much as the run.** `getup_snapshot.py` rendered `best.pt`, which only moves on a new record. It froze at iteration 300 while the run was at 900, so for nine minutes I was looking at a 600-iteration-old policy and printing current metrics beside it. Switching to the newest checkpoint changed the picture instantly and for the worse. Watching the wrong object is worse than not watching.
+- **Carried forward untested**: the `2*min` foot gate. It removed 87% of `rise` for the previous policy and may still be too harsh, but this run cannot say.
+
 ### E29  2026-08-15  The shaping was gamed in 200 iterations, by a headstand
 - **Caught by looking**, after the metrics showed an impossible combination: pelvis at 0.804 m (92% of standing) with the head at 0.322 of standing height. The head was BELOW the pelvis.
 - **The policy inverted.** Rendered frames: lying -> pike on hands and feet with the hips up -> balanced head-down with the legs in the air -> folded over. Measured on the resulting policy at 3.2 s: pelvis 0.71 m, head 0.14 m.

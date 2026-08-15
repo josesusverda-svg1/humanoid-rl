@@ -44,6 +44,22 @@ def main() -> int:
     args = ap.parse_args()
 
     run = args.run or sorted((REPO_ROOT / "runs").glob("getup-*"))[-1]
+    # A run has no best.pt until its first evaluation. Say so in one line rather than
+    # dumping a traceback: this is called every ten minutes and a stack trace in that slot
+    # trains the reader to stop looking at the output.
+    # The NEWEST checkpoint, not best.pt.
+    #
+    # best.pt only moves when the eval return sets a record, so on a run that peaks early and
+    # then degrades it freezes. Measured here: best.pt sat at iteration 300 while the run was
+    # at 900, so nine minutes of "looking at the frames" were nine minutes of looking at a
+    # 600-iteration-old policy while reporting current metrics beside it. Watching the wrong
+    # object is worse than not watching.
+    ckpts = sorted((run / "checkpoints").glob("iter_*.pt"))
+    best = run / "checkpoints" / "best.pt"
+    ckpt_path = ckpts[-1] if ckpts else (best if best.exists() else None)
+    if ckpt_path is None:
+        print(f"   no checkpoint in {run.name} yet (first evaluation not reached)")
+        return 0
     cfg = Config.load(run / "config.yaml")
     device = torch.device(resolve_device(cfg.run.device))
     env = ThreadedVecEnv(
@@ -53,8 +69,7 @@ def main() -> int:
         domain_rand=replace(cfg.domain_rand, enabled=False),
         action_scale_mode=cfg.env.action_scale_mode,
     )
-    ckpt = torch.load(run / "checkpoints" / "best.pt", map_location=device,
-                      weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     policy = ActorCritic(
         env.obs_dim, env.nu, actor_hidden=tuple(cfg.network.actor_hidden),
         critic_hidden=tuple(cfg.network.critic_hidden), activation=cfg.network.activation,
@@ -68,7 +83,7 @@ def main() -> int:
     obs = env.reset()
     frames = []
 
-    print(f"{run.name}  iteration {ckpt.get('iteration', 0):,}")
+    print(f"{run.name}  {ckpt_path.name}  iteration {ckpt.get('iteration', 0):,}")
     print(f"{'t':>6}{'pelvis':>9}{'head':>8}{'feet BW':>9}{'knee':>7}{'hands':>8}")
     with torch.no_grad(), mujoco.Renderer(model, height=460, width=380) as renderer:
         for step in range(max(steps) + 1):

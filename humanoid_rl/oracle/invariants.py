@@ -746,6 +746,51 @@ def getup_hold_and_thresholds_are_reachable(config) -> list[Finding]:
         f"force floor {cfg.u_force_total_bw} under a {light} light-mass draw")]
 
 
+@check
+def exploration_has_a_ceiling(config) -> list[Finding]:
+    """`log_std_max` must actually bound exploration, not merely exist.
+
+    This project has now lost runs to log_std in BOTH directions, which is why the check
+    covers both:
+
+    * E05: log_std was INITIALISED above its own ceiling. `torch.clamp` passes no gradient
+      strictly outside its range, so the parameter froze at std 1.0 for 610 iterations.
+    * E30: log_std_max was 5.0, which is std 148 and therefore no ceiling at all. With a
+      positive entropy bonus and nothing pulling back, exploration ran 0.79 -> 3.43 on an
+      action range of [-1, 1], the policy drowned in its own noise, and eval return fell from
+      833 at iteration 300 to 19 at iteration 900.
+
+    A ceiling above about std 2 is not a ceiling: past that, most sampled actions clip
+    against the action range and the policy is closer to noise than to a policy.
+    """
+    import math
+
+    ppo = config.ppo
+    ceiling = math.exp(ppo.log_std_max)
+    init = config.network.init_noise_std
+    out: list[Finding] = []
+    if ceiling > 2.0:
+        out.append(Finding(
+            Severity.CONTRADICTION, "exploration ceiling",
+            f"log_std_max {ppo.log_std_max} allows std {ceiling:.1f} on an action range of "
+            f"[-1, 1]. Above std 2 most samples clip and the policy is mostly noise.",
+            remedy="Set log_std_max near 0.0 (std 1.0). Walking trained fine at 0.4-1.4.",
+            caught_before="Exploration ran 0.79 -> 3.43 and eval return collapsed 833 -> 19 "
+                          "between iterations 300 and 900.",
+        ))
+    if init > ceiling:
+        out.append(Finding(
+            Severity.CONTRADICTION, "exploration ceiling",
+            f"init_noise_std {init} starts ABOVE the ceiling {ceiling:.2f}. clamp passes no "
+            f"gradient strictly outside its range, so log_std would be frozen from step one.",
+            remedy=f"Set init_noise_std at or below {ceiling:.2f}.",
+            caught_before="E05: frozen at std 1.0 for 610 iterations.",
+        ))
+    return out or [Finding(
+        Severity.OK, "exploration ceiling",
+        f"std capped at {ceiling:.2f}, starting from {init}")]
+
+
 def run_all(config, checkpoint: Path | None = None) -> list[Finding]:
     """Every invariant. Failures inside a check are reported, never raised."""
     findings: list[Finding] = []
