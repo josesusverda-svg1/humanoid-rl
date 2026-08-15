@@ -249,7 +249,12 @@ class ThreadedVecEnv:
         # gets a horizontal velocity impulse. Applied inside the same worker phase as
         # resets, so shoving costs no extra barrier round.
         self._push_lists: list[np.ndarray] = [np.empty(0, dtype=np.int64)] * self.num_workers
-        self._push_vel = np.zeros((self.num_envs, 3))
+        # Six components, not three: linear velocity AND angular. A shove that only
+        # translates the pelvis makes the humanoid slide; a real impact off the centre of
+        # mass also spins it, which is what turns one disturbance into many different ways
+        # of ending up on the floor. The domain-randomisation push leaves the angular half
+        # at zero and behaves exactly as before.
+        self._push_vel = np.zeros((self.num_envs, 6))
         push_steps = max(1, int(self.dr_cfg.push_interval_s / self.dt))
         self._push_period = push_steps
         self._push_countdown = self.rng.integers(1, push_steps + 1, size=self.num_envs)
@@ -332,7 +337,8 @@ class ThreadedVecEnv:
         push_vel = self._push_vel
         for i in self._push_lists[widx]:
             d = datas[i]
-            d.qvel[0:3] += push_vel[i]
+            d.qvel[0:3] += push_vel[i, 0:3]
+            d.qvel[3:6] += push_vel[i, 3:6]
 
         for i in self._reset_lists[widx]:
             d = datas[i]
@@ -450,11 +456,19 @@ class ThreadedVecEnv:
         if due is None or not np.any(due):
             return np.empty(0, dtype=np.int64)
         idx = np.flatnonzero(due).astype(np.int64)
+        # A task may hand over the full impulse itself (linear + angular). If it only says
+        # WHICH environments, fall back to a planar shove of the configured speed.
+        supplied = getattr(self.task, "push_impulse", None)
+        if supplied is not None:
+            imp = supplied()
+            if imp is not None:
+                self._push_vel[idx] = imp[idx]
+                return idx
         speed = float(getattr(self.task.cfg, "hold_push_vel", 0.6))
         angle = self.rng.uniform(-np.pi, np.pi, idx.size)
+        self._push_vel[idx] = 0.0
         self._push_vel[idx, 0] = speed * np.cos(angle)
         self._push_vel[idx, 1] = speed * np.sin(angle)
-        self._push_vel[idx, 2] = 0.0
         return idx
 
     def _select_pushes(self) -> np.ndarray:
@@ -468,9 +482,9 @@ class ThreadedVecEnv:
         if idx.size:
             angle = self.rng.uniform(0.0, 2.0 * np.pi, size=idx.size)
             magnitude = self.rng.uniform(0.0, cfg.push_vel_xy, size=idx.size)
+            self._push_vel[idx] = 0.0
             self._push_vel[idx, 0] = magnitude * np.cos(angle)
             self._push_vel[idx, 1] = magnitude * np.sin(angle)
-            self._push_vel[idx, 2] = 0.0
             # Randomise the next interval so pushes never fall into lockstep across
             # environments, which would put a periodic spike in the reward signal.
             self._push_countdown[idx] = self.rng.integers(

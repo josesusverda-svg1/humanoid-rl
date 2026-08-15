@@ -74,6 +74,41 @@ class GetUpConfig:
     w_effort: float = -0.25
     w_smooth: float = -0.10
 
+    # --- the ball. ONE heavy hit per episode, once he is genuinely up.
+    #
+    # Asked for as "hit him once while he is up with a mid-size heavy ball so he falls
+    # differently". The purpose is not robustness drilling; it is to generate a FALL, and a
+    # fall that the body's own posture produced rather than one an offline generator guessed.
+    # The pose bank is built by toppling and dropping and gives 45% side-lying against the
+    # 76% a real policy produces. A hit at the top of a successful rise puts him on the floor
+    # the honest way, and the next attempt starts from there.
+    #
+    # Once per episode, so the rise is never interrupted twice and there is always time to
+    # get back up afterwards. Only when he is genuinely up: a hit on a body already on the
+    # floor mostly just slides it, because the ground absorbs the impulse within one control
+    # step (measured: 2.5 m/s commanded reads 0.9 m/s a step later on a prone body).
+    ball_enabled: bool = True
+    #: How far up he must be before the ball is thrown. 1.00 is standing, sitting is ~0.45.
+    #: 0.75 means "well off the floor", so it lands on a rise that mostly worked.
+    ball_min_head_ratio: float = 0.75
+    #: Ball MASS and SPEED are drawn separately, and the impulse follows from them, rather
+    #: than picking a pelvis velocity directly. That is what guarantees genuinely different
+    #: landings: a light fast ball and a heavy slow one deliver different momentum, and the
+    #: spread across the two ranges is far wider than any single hand-picked number.
+    #:
+    #:     dv = (1 + e) * m_ball * v_ball / m_body
+    #:
+    #: with e = 0.5 (a partly elastic bounce) and m_body = 50.05 kg. Over 3-10 kg and
+    #: 6-14 m/s that is 0.54 to 4.2 m/s at the pelvis: from a stagger he can recover, through
+    #: a clean topple, to being sent sprawling.
+    ball_mass_range: tuple[float, float] = (3.0, 10.0)
+    ball_speed_range: tuple[float, float] = (6.0, 14.0)
+    ball_restitution: float = 0.5
+    #: Where the ball lands, as a height above the pelvis. This is the other half of "falls
+    #: differently": the same impulse in the chest spins him far more than one in the hip,
+    #: and the resulting angular velocity decides which side he ends up on.
+    ball_impact_height_range: tuple[float, float] = (0.0, 0.65)
+
     #: Fraction of body weight the FEET must carry before `rise` pays in full.
     #:
     #: Added after a person watched a video and said "he puts all the pressure on one hand,
@@ -109,6 +144,7 @@ class GetUpTask(Task):
         self._standing_height = 0.877
         self._standing_head = 1.514
         self._body_weight = 490.99
+        self._body_mass = 50.05
         self._qadr = np.arange(7, 35)
         self._knee_qadr = np.zeros(2, dtype=int)
         self._nominal = np.zeros(28)
@@ -129,7 +165,8 @@ class GetUpTask(Task):
         model = prepared.model
         self._standing_height = float(prepared.standing_height)
         self._standing_head = float(prepared.standing_head_height)
-        self._body_weight = float(model.body_mass.sum() * 9.81)
+        self._body_mass = float(model.body_mass.sum())
+        self._body_weight = self._body_mass * 9.81
         self._qadr = np.asarray(prepared.actuator_qpos_adr, dtype=int)
         self._nominal = np.asarray(prepared.default_joint_pos, dtype=float)
         self._torque_limit = np.abs(model.jnt_actfrcrange[:, 1])[
@@ -184,7 +221,10 @@ class GetUpTask(Task):
         ts["pushed"] = np.zeros(n, dtype=bool)
         ts["from_standing"] = np.zeros(n, dtype=bool)
         ts["prev_prev_action"] = np.zeros((n, state.action.shape[1]))
+        ts["ball_thrown"] = np.zeros(n)
+        ts["ball_hits"] = np.zeros(n)
         self._push_request = np.zeros(n, dtype=bool)
+        self._impulse = np.zeros((n, 6))
 
     # ------------------------------------------------------------------ predicate
 
@@ -262,7 +302,47 @@ class GetUpTask(Task):
         # The shove: fires once per hold attempt, at an unannounced step.
         due = U & ~ts["pushed"] & (ts["hold_steps"] >= ts["push_at"])
         ts["pushed"] |= due
-        self._push_request = due
+
+        # The ball: one heavy hit per episode, thrown once he is genuinely up.
+        ball = np.zeros_like(due)
+        if cfg.ball_enabled:
+            ready = (~ts["ball_thrown"].astype(bool)) & (
+                state.head_height_ratio >= cfg.ball_min_head_ratio)
+            if ready.any():
+                k = int(ready.sum())
+                rng = self._rng
+                ang = rng.uniform(-np.pi, np.pi, k)
+                mass = rng.uniform(*cfg.ball_mass_range, k)
+                speed = rng.uniform(*cfg.ball_speed_range, k)
+                # Momentum transfer, so mass and speed both matter and neither alone fixes
+                # the outcome.
+                dv = (1.0 + cfg.ball_restitution) * mass * speed / self._body_mass
+                # Height of the impact above the pelvis. The lever arm turns the same
+                # momentum into a very different amount of tumble.
+                lever = rng.uniform(*cfg.ball_impact_height_range, k)
+                imp = np.zeros((k, 6))
+                imp[:, 0] = dv * np.cos(ang)
+                imp[:, 1] = dv * np.sin(ang)
+                imp[:, 2] = rng.uniform(-0.2, 0.2, k) * dv
+                # Angular velocity about the axis perpendicular to the shove, magnitude set
+                # by the lever arm. A hit in the chest topples him over his feet; one at the
+                # hip mostly shoves him sideways.
+                imp[:, 3] = -dv * lever * np.sin(ang) * 3.0
+                imp[:, 4] = dv * lever * np.cos(ang) * 3.0
+                imp[:, 5] = rng.normal(0.0, 0.4, k) * dv
+                self._impulse[ready] = imp
+                ts["ball_thrown"][ready] = 1.0
+                ts["ball_hits"][ready] += 1.0
+                ball = ready
+
+        # The hold shove keeps its own impulse: purely planar, as specified.
+        if due.any():
+            ang = self._rng.uniform(-np.pi, np.pi, int(due.sum()))
+            planar = np.zeros((int(due.sum()), 6))
+            planar[:, 0] = cfg.hold_push_vel * np.cos(ang)
+            planar[:, 1] = cfg.hold_push_vel * np.sin(ang)
+            self._impulse[due] = planar
+        self._push_request = due | ball
 
         upright = np.clip(-state.gravity_body[:, 2], 0.0, 1.0)
         # Head height clipped at 1.0, so throwing the head ABOVE standing height pays nothing.
@@ -322,6 +402,10 @@ class GetUpTask(Task):
         """Environments that should be shoved this step, for the engine's push machinery."""
         return self._push_request
 
+    def push_impulse(self) -> np.ndarray | None:
+        """The full 6-vector per environment: linear velocity then angular."""
+        return self._impulse
+
     # ------------------------------------------------------------------ resets
 
     def reset_batch(self, state: BatchState, idx: np.ndarray,
@@ -331,6 +415,8 @@ class GetUpTask(Task):
         ts["held_ever"][idx] = False
         ts["standing"][idx] = False
         ts["pushed"][idx] = False
+        ts["ball_thrown"][idx] = 0.0
+        ts["ball_hits"][idx] = 0.0
         ts["push_at"][idx] = rng.integers(*self.cfg.hold_push_window, size=idx.size)
         ts["prev_prev_action"][idx] = 0.0
 
@@ -389,4 +475,5 @@ class GetUpTask(Task):
                  ).mean()),
             "knee_max": float(state.qpos[:, self._knee_qadr].max(axis=1).mean()),
             "spin_deg_s": float(np.degrees(np.abs(state.qvel[:, 5])).mean()),
+            "ball_hits": float(ts["ball_hits"].mean()),
         }

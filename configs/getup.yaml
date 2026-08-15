@@ -10,7 +10,7 @@ env:
   num_envs: 4096
   num_workers: null
   decimation: 4
-  max_episode_steps: 1000
+  max_episode_steps: 2500
   action_scale_mode: full_range
 network:
   actor_hidden:
