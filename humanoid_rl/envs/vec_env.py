@@ -87,12 +87,13 @@ class ThreadedVecEnv:
         decimation: int = 4,
         max_episode_steps: int = 1000,
         action_filter_hz: float = 8.0,
+        action_scale_mode: str = "fraction",
         seed: int = 0,
         domain_rand: DomainRandConfig | None = None,
     ) -> None:
         # Loads the MJCF, converts its torque motors into PD position servos, derives the
         # standing pose, and adds foot touch sensors. See envs/model_prep.py.
-        self.prepared = prepare(model_path)
+        self.prepared = prepare(model_path, action_scale_mode=action_scale_mode)
         self.model = self.prepared.model
         self.task = task
         self.num_envs = int(num_envs)

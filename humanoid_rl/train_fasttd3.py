@@ -80,6 +80,7 @@ def main() -> int:
         num_workers=cfg.env.num_workers, decimation=cfg.env.decimation,
         max_episode_steps=cfg.env.max_episode_steps,
         action_filter_hz=cfg.env.action_filter_hz, seed=cfg.run.seed,
+        action_scale_mode=cfg.env.action_scale_mode,
         domain_rand=cfg.domain_rand,
     )
     agent = FastTD3(env.obs_dim, env.nu, cfg.fasttd3, cfg.env.num_envs, device)
@@ -212,6 +213,7 @@ def main() -> int:
                     num_workers=cfg.env.num_workers, decimation=cfg.env.decimation,
                     max_episode_steps=cfg.env.max_episode_steps,
                     action_filter_hz=cfg.env.action_filter_hz, seed=cfg.run.seed + 10_000,
+                    action_scale_mode=cfg.env.action_scale_mode,
                     domain_rand=replace(cfg.domain_rand, enabled=False),
                 )
             shim = _PolicyShim(agent.actor)

@@ -57,6 +57,19 @@ class EnvConfig:
     #: policy, the standard rate for locomotion control.
     decimation: int = 4
     max_episode_steps: int = 1000
+    #: How a policy action maps to a joint-angle offset.
+    #:
+    #: "fraction" (default) gives 0.6 of each joint's half-range, which covers 56.2% of joint
+    #: travel on average and only 37.5% of the knee: commandable to 1.05 rad of a 2.79 rad
+    #: range. Kneeling needs about 2.4, so a get-up is not hard to learn under it, it is
+    #: INEXPRESSIBLE. Measured on the first get-up runs: the knee peaked at 1.057 rad, the
+    #: ceiling to a hundredth.
+    #:
+    #: "full_range" takes the half-width about the NOMINAL angle instead, so coverage is
+    #: 100% on every joint while a = 0 still means the nominal pose exactly. Costs 3.1x
+    #: coarser knee resolution. Walking has never needed the extra travel, so it stays on
+    #: "fraction" and its runs are bit-identical.
+    action_scale_mode: str = "fraction"
     #: Cutoff of the one-pole low-pass on applied joint targets, in Hz. 0 disables. Exists
     #: because a policy learned to stabilise its gait with its own high-frequency action
     #: noise (vibrational stabilisation), which made deterministic evaluation collapse while

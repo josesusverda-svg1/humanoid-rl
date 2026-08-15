@@ -346,7 +346,8 @@ def _encode(frames: np.ndarray, out_path: Path, fps: int) -> None:
 
 
 def build_render_env(
-    model_path: str | Path, task, *, seed: int = 0, max_episode_steps: int = 100_000
+    model_path: str | Path, task, *, seed: int = 0, max_episode_steps: int = 100_000,
+    action_scale_mode: str = "fraction",
 ) -> ThreadedVecEnv:
     """A single-environment env suitable for rendering.
 
@@ -358,6 +359,11 @@ def build_render_env(
     return ThreadedVecEnv(
         model_path,
         task,
+        # MUST match training. A render env built with a different action scale is a
+        # different robot: the same policy output would move the joints by a different
+        # amount, so the video would show behaviour the policy never produced. The trainer
+        # asserts the two agree.
+        action_scale_mode=action_scale_mode,
         num_envs=1,
         num_workers=1,
         max_episode_steps=max_episode_steps,

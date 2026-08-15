@@ -91,6 +91,24 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
 
 Newest first. `E##  date  what changed`.
 
+### E27  2026-08-15  The knee could not reach a kneel, and the fix was written but never connected
+- **Found by a person watching**: "he bends his knees, leans on his hands and heels, but I do not see him trying to rock or rise. As if he likes hanging there."
+- **Measured, and it is not a preference**:
+
+```
+knee joint range            [0.00, 2.79] rad
+COMMANDABLE ceiling          1.05 rad      (action_scale_mode = "fraction")
+a kneel needs               ~2.40 rad
+peak observed in the run     1.057 rad     <- the ceiling, to a hundredth
+```
+
+- **The action space could not express the pose.** The agents' spec said this in section 0.1 and I built `action_scale_mode="full_range"`, verified it gives 100% joint coverage against 56.2%, committed it, and **never plumbed it through**. `vec_env` called `prepare(model_path)` with no mode, so every run since silently kept the old mapping. Two get-up runs, 600M steps total, spent on a body that physically could not fold a leg under itself.
+- **Verdict**: WASTED. Not a slow-learning problem: no amount of training makes an inexpressible movement expressible.
+- **Honest caveat**: mean knee angle was 0.38 against the 1.05 ceiling, so the limit was not binding on average and part of the parking is still the reward. The PEAK sitting exactly on the ceiling is what proves the limit bit.
+- **Fix**: `env.action_scale_mode` plumbed through Config -> ThreadedVecEnv -> prepare(), and passed at all five construction sites. Knee now commandable to 2.79 rad; driving the action to +1.0 reaches 2.80. Walking stays on "fraction" and its runs are bit-identical.
+- **Guard added, because this is the third time**: the trainer now ASSERTS that the render env's `action_scale` matches the training env's. A render env with a different action mapping is a different robot, so every video would show behaviour the policy never produced. Same family as the 8-second episodes, the transposed actuators and the overlay printing a command the policy never received.
+- **Lesson**: building a capability and not wiring it is indistinguishable, from the outside, from not building it. The Oracle checks configs against each other; nothing checked that a config field reaches the code that consumes it.
+
 ### E26  2026-08-15  Get-up run 1: sits up on one arm, never uses its legs
 - **Setup**: new GetUpTask, 300M steps, 1200-pose bank, 2 s hold, 13-conjunct standing predicate.
 - **Result**: got up to sitting and stopped. Best eval at iteration 2700: head 0.537, root 0.322, pelvis_upright 0.933, **standing 0.0%**, return 690 (of a ~3500 ceiling).

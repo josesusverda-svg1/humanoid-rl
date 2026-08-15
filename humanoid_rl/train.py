@@ -77,6 +77,7 @@ class Trainer:
             decimation=config.env.decimation,
             max_episode_steps=config.env.max_episode_steps,
             action_filter_hz=config.env.action_filter_hz,
+            action_scale_mode=config.env.action_scale_mode,
             seed=seed,
             domain_rand=config.domain_rand,
         )
@@ -341,6 +342,7 @@ class Trainer:
                 decimation=cfg.env.decimation,
                 max_episode_steps=cfg.env.max_episode_steps,
                 action_filter_hz=cfg.env.action_filter_hz,
+            action_scale_mode=cfg.env.action_scale_mode,
                 # Fixed offset seed: evaluation is reproducible and independent of how far
                 # the training environment's RNG has advanced.
                 seed=cfg.run.seed + 10_000,
@@ -354,8 +356,22 @@ class Trainer:
     def _get_render_env(self) -> ThreadedVecEnv:
         if self.render_env is None:
             self.render_env = build_render_env(
-                REPO_ROOT / self.cfg.env.model_path, self.task, seed=self.cfg.run.seed + 20_000
+                REPO_ROOT / self.cfg.env.model_path, self.task,
+                seed=self.cfg.run.seed + 20_000,
+                action_scale_mode=self.cfg.env.action_scale_mode,
             )
+            # Guard, not a comment. Training, evaluation and rendering must share one action
+            # mapping; if they drift, every video and every eval silently describes a robot
+            # that was never trained. This exact class of fault has now appeared three times
+            # in this project (episode length, actuator ordering, the overlay's command).
+            import numpy as np
+
+            if not np.allclose(self.render_env.prepared.action_scale,
+                               self.env.prepared.action_scale):
+                raise RuntimeError(
+                    "render env action_scale differs from the training env: "
+                    f"{self.render_env.prepared.action_scale[:3]} vs "
+                    f"{self.env.prepared.action_scale[:3]}")
         return self.render_env
 
     def capture_skeleton(self) -> Path | None:
