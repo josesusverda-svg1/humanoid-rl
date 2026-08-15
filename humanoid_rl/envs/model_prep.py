@@ -114,6 +114,17 @@ class PreparedModel:
     floor_geom_id: int
     #: Body ids that should never touch the ground. Contact here means a fall.
     non_foot_body_ids: np.ndarray
+    #: qpos index of each actuator's joint, length nu, IN ACTUATOR ORDER.
+    #:
+    #: Never assume actuator i corresponds to qpos[7 + i]. On this model it does not: on both
+    #: legs hip_y and hip_z are transposed, so 4 of 28 actuators disagree with that guess.
+    #: Anything that pairs a per-actuator quantity (a control range, a target, an action
+    #: offset) with a joint angle must go through this map. Two live bugs came from not
+    #: doing so, both silent: the joint-limit penalty scored hip_y's +-2.44 rad range against
+    #: hip_z's +-1.05 rad one at weight -5.0, and the tracking task commanded each hip_z
+    #: servo its reference clip's hip_y angle.
+    actuator_qpos_adr: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.int32))
     #: Indices into `data.sensordata` giving the normal force under each foot, in newtons.
     foot_touch_adr: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
     #: Start index into `data.sensordata` of each foot's world-frame linear velocity (3).
@@ -501,6 +512,9 @@ def prepare(
         default_qpos=default_qpos,
         default_joint_pos=default_joint_pos,
         action_scale=action_scale,
+        actuator_qpos_adr=np.array(
+            [model.jnt_qposadr[model.actuator_trnid[i, 0]] for i in range(model.nu)],
+            dtype=np.int32),
         standing_height=standing_height,
         foot_body_ids=foot_bodies,
         foot_geom_ids=foot_geoms,

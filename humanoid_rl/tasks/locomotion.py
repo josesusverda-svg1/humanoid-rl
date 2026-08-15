@@ -431,6 +431,13 @@ class LocomotionTask(Task):
         self.cfg = config or LocomotionConfig()
         self._limit_lo = np.full(28, -1e9)
         self._limit_hi = np.full(28, 1e9)
+        #: qpos index per ACTUATOR. Set from the prepared model; the fallback assumes the
+        #: identity mapping, which is wrong on this humanoid and is why it is overwritten.
+        self._joint_qpos_adr = np.arange(7, 7 + 28)
+
+    def set_joint_qpos_adr(self, adr: np.ndarray) -> None:
+        """Where each actuator's joint angle lives in qpos. See PreparedModel."""
+        self._joint_qpos_adr = np.asarray(adr, dtype=int)
 
     def set_joint_limits(self, lo: np.ndarray, hi: np.ndarray) -> None:
         """Joint range for the soft-limit penalty, from the prepared model."""
@@ -789,9 +796,17 @@ class LocomotionTask(Task):
             + np.clip(separation - cfg.feet_distance_max, 0.0, 0.3)
         )
         # G1's soft joint-limit penalty at 90% of range.
+        #
+        # Indexed through actuator_qpos_adr, NOT qpos[7:7+nu]. The limits come from
+        # actuator_ctrlrange in ACTUATOR order, and on this model actuator order is not qpos
+        # order: hip_y and hip_z are transposed on both legs, so 4 of 28 were mismatched.
+        # The effect was silent and pointed the wrong way for us: hip_y's true +-2.44 rad
+        # range was scored against hip_z's +-1.05 rad one, so deep hip flexion, which is
+        # exactly what a long stride needs, read as a limit violation at weight -5.0.
+        angles = state.qpos[:, self._joint_qpos_adr]
         overflow = (
-            np.clip(self._limit_lo * 0.9 - state.qpos[:, 7:7 + joint_vel.shape[1]], 0, None)
-            + np.clip(state.qpos[:, 7:7 + joint_vel.shape[1]] - self._limit_hi * 0.9, 0, None)
+            np.clip(self._limit_lo * 0.9 - angles, 0, None)
+            + np.clip(angles - self._limit_hi * 0.9, 0, None)
         )
         terms[:, 20] = cfg.w_dof_pos_limits * np.sum(overflow, axis=1)
         # Only-positive total, legged_gym's oldest trick and the field's universal answer

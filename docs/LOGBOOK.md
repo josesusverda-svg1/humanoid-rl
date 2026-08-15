@@ -52,6 +52,7 @@ lists what it invalidated.
 
 | Bug | Found | Invalidated | Fixed in |
 |---|---|---|---|
+| **Actuator order != qpos order**: hip_y/hip_z transposed on both legs, 4 of 28 | E25 | The joint-limit penalty scored hip_y against hip_z's tighter range at w=-5.0, penalising deep hip flexion. `tracking.py` commanded swapped hip angles on every clip. | `PreparedModel.actuator_qpos_adr` |
 | Videos played at 0.4x (125 Hz physics encoded at 50 fps) | E01 | Every visual gait judgement before it | `frame_skip`, `encode_fps` |
 | `gait_symmetry` scored 1.0 for standing still (defined over stance time) | E02 | Every symmetry claim before it | Redefined over SWING time |
 | `explained_variance` was tautological (`returns = advantages + values`) | E10 | All critic-quality claims | Renamed `advantage_share` |
@@ -89,6 +90,23 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
 ## Entries
 
 Newest first. `E##  date  what changed`.
+
+### E25  2026-08-14  Actuator order is NOT qpos order, and two live bugs came from assuming it is
+- **Found while designing the get-up task**, by agents measuring the model rather than reading comments.
+- **The fact**: on this humanoid, actuator `i` does NOT control `qpos[7 + i]`. On both legs `hip_y` and `hip_z` are transposed, so **4 of 28 actuators** disagree with that assumption:
+
+```
+actuator 15 right_hip_z -> qpos 23      qpos[7+15] is right_hip_y
+actuator 16 right_hip_y -> qpos 22      qpos[7+16] is right_hip_z
+actuator 22 left_hip_z  -> qpos 30      (same transposition)
+actuator 23 left_hip_y  -> qpos 29
+```
+
+- **Live bug 1, in the walking task we have been training all week.** The soft joint-limit penalty built its bounds from `actuator_ctrlrange` (actuator order) and indexed them against `state.qpos[:, 7:7+nu]` (qpos order). So **`hip_y`'s true +-2.44 rad range was scored against `hip_z`'s +-1.05 rad one**, at weight -5.0. The penalty therefore fired on deep hip flexion, which is exactly the motion a long stride requires, and we have spent the week fighting short strides (0.11 -> 0.30 m against a human 0.6-0.8).
+- **Honest size of the effect**: `reward/dof_pos_limits` measured -0.007/step, so it was not a large direct cost. Whether it acted as a barrier to the deeper flexion that never got tried is not established by that number, and I am not claiming it was.
+- **Live bug 2**, `tasks/tracking.py:181`: returns `lib.qpos[idx, 7:]` as an `action_offset`, which the engine applies in actuator order. Every tracked clip commands each `hip_z` servo the reference's `hip_y` angle and vice versa. The tracking task is not currently in use, so nothing downstream is contaminated, but it would have been.
+- **Fix**: `PreparedModel.actuator_qpos_adr` now carries the map, `vec_env` hands it to the task, and the limit penalty indexes through it. Verified: the map differs from the naive assumption on exactly 4 of 28 actuators, and the environment still runs with finite rewards.
+- **Rule**: anything pairing a per-actuator quantity (control range, target, action offset) with a joint angle must go through `actuator_qpos_adr`. Never `qpos[7 + i]`.
 
 ### E24  2026-08-14  Abdomen exploration floor: INCONCLUSIVE, and I should have known before running
 - **Hypothesis**: the 48 degree backward waist fold persists because `abdomen_y` has the lowest exploration of all 28 action dimensions (std 0.196 against a mean of 0.889), so PPO never samples its way out.

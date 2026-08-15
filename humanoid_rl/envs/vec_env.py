@@ -202,6 +202,11 @@ class ThreadedVecEnv:
             task.configure_for_model(self.prepared.standing_height)
         if hasattr(task, "set_joint_limits"):
             task.set_joint_limits(self._ctrl_lo.copy(), self._ctrl_hi.copy())
+        # The limits above are per-ACTUATOR; the task reads joint angles out of qpos, and on
+        # this model the two orders differ (hip_y/hip_z transposed on both legs). Hand over
+        # the map so the pairing is correct rather than assumed.
+        if hasattr(task, "set_joint_qpos_adr"):
+            task.set_joint_qpos_adr(self.prepared.actuator_qpos_adr)
         # Published so a task can build an absolute reset pose that mixes reference frames
         # with the nominal stance, without needing to know how the engine derived it.
         self.state.task_state["_nominal_qpos"] = self.prepared.default_qpos.copy()
