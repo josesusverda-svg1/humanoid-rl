@@ -38,6 +38,7 @@ Three rules that keep this honest:
 | Weakening gait terms so AMP owns gait shaping | WORSE | E08 | Foot slip 42-51% of travel speed vs 27% baseline, over 7 evals, never trended down. |
 | Velocity-scaled swing-height target (KSLC) | NO EFFECT | E15 | Measured on our own mocap: mean swing clearance is `0.063 + 0.020*speed`. Worth ≤0.03/step across the whole envelope. Not our problem. |
 | `difficulty_init = 0.45` | WORSE | E13 | On the OLD crushed envelope this meant 0.17 m/s commands, cheaper to ignore than follow. Retried at 0.7 on the fixed envelope: E17. |
+| Steepening the torso posture reward | NO EFFECT expected | E23 | Measured counterfactual: straightening RAISES reward +0.13/step at equal speed. Reward already prefers upright; the problem is optimisation, not pricing. |
 | Reward normalisation to rescue FastTD3 | NO EFFECT | E22c | Critic measured unsaturated: 4.7e-16 mass on the top atom, 65 of 401 atoms in use. Scale is not the problem. |
 | Single-run A/B on training outcome | INVALID | E22b | Byte-identical configs gave 323 vs 2451 mean return. Any effect under ~7x is inside the noise. |
 | Replay ratio as the FastTD3 fix | WORSE | E22 | Ratio 2 and 16 both flat, 100% falls on 96 of 96 evals. |
@@ -62,27 +63,54 @@ lists what it invalidated.
 
 ## Current state
 
-Best policy: `runs/envelope-20260814-100402/checkpoints/best.pt` (PPO, 500M steps).
-All numbers below are post-E16, so they are the first trustworthy ones in the project.
+Best policy: `runs/envelope-20260814-100402/checkpoints/best.pt`, **iteration 3100**.
 
-| Metric | Value | Human | Note |
+READ THE CONDITION COLUMN. An earlier version of this table mixed three different
+measurement conditions into one column and produced a policy that does not exist.
+
+| Metric | Value | Condition | Human |
 |---|---|---|---|
-| falls (deterministic) | 6% | - | at a held 1.0 m/s command |
-| forward speed | 0.78 m/s | 1.2-1.4 | mocap reference is 0.62 |
-| speed tracking ratio | 0.51-0.59 | 1.0 | responds to command, undershoots ~40% |
-| stride length | 0.30 m | 0.6-0.8 | was 0.11 three runs ago |
-| step rate | 2.62 /s | 1.6-2.0 | too fast |
-| stance width | 0.36 m | 0.10-0.15 | too wide |
-| **torso upright** | **0.54** | **0.95-1.00** | **worst term; it leans to go fast** |
-| human-likeness | 9% | 100% | fell from 15% as speed rose |
+| return | 3034 | eval at iter 3100 | - |
+| falls | 15.6% | eval at iter 3100 | - |
+| episode length | 931 steps (7.4 s) | eval at iter 3100 | - |
+| mean speed | 0.589 m/s | eval at iter 3100, mixed commands | 1.2-1.4 |
+| speed | 0.78 m/s | held 1.0 m/s command, gait_report | 1.2-1.4 |
+| torso_upright | **0.726** | eval at iter 3100 | 0.95-1.00 |
+| torso_upright | 0.658 | held 1.0 m/s command | 0.95-1.00 |
+| torso tilt DIRECTION | **48.5 deg BACKWARD and LEFT** | held 1.0 m/s command | upright |
 
-AMP readiness: **NOT ready**. Passes "stays up", fails "obeys speed" (0.58 vs 0.70 needed).
+The often-quoted `torso_upright 0.543` belongs to iteration **5050**, a later and WORSE
+checkpoint (return 2328, falls 29.7%) that was never selected as best. Quoting it beside
+iteration 3100's return described a policy that never existed.
 
----
+AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
 
 ## Entries
 
 Newest first. `E##  date  what changed`.
+
+### E23  2026-08-14  The lean: three of my claims were wrong, and it is not a reward problem
+- **What I claimed**: the humanoid leans FORWARD at torso_upright 0.54, exploiting the termination boundary at 0.50, because the reward prices speed above posture roughly 2:1.
+- **All three are false.** Verified independently, not taken from the review:
+
+1. **Checkpoint mismatch.** `best.pt` is iteration 3100 with `torso_upright 0.726`. The 0.543 figure is iteration 5050, a later checkpoint with return 2328 and 29.7% falls that was never selected. I quoted its posture next to iteration 3100's return, speed and fall rate, describing a policy that does not exist.
+2. **The termination boundary is dead code.** `locomotion.py:1111-1112` sets `stooped = np.zeros_like(fallen)` and `head_down = np.zeros_like(fallen)`; the conformance audit removed posture termination. `terminate_torso_upright = 0.5` is read only by `tracking.py`. There is no cliff at 0.50, so nothing is hugging it.
+3. **The lean is BACKWARD, not forward.** Rolling out best.pt at a held 1.0 m/s and decomposing the torso z-axis in the heading frame: fore component **-0.640, forward in 0.0% of samples**; lateral +0.369, **left in 100%**; `abdomen_y = -0.755 rad`; tilt 48.5 degrees. It is a backward-and-left waist fold. `torso_upright = cos(tilt)` is SIGN-BLIND, so the metric cannot tell forward from backward and neither could I.
+
+- **The actual finding, and it inverts the diagnosis.** Paired counterfactual, same seed, abdomen actuator outputs scaled by alpha:
+
+| alpha | torso_upright | tilt | speed | **reward/step** |
+|---|---|---|---|---|
+| 1.00 | 0.658 | 48.9 deg | 0.694 | 3.377 |
+| **0.75** | **0.816** | **35.3 deg** | 0.693 | **3.507** |
+| 0.50 | 0.927 | 22.0 deg | 0.606 | 3.402 |
+| 0.25 | 0.978 | 12.0 deg | 0.561 | 3.289 |
+
+Straightening the trunk **raises total reward by +0.13/step at no speed cost**. The reward already prefers upright. The policy is sitting in a local optimum that its own reward function disprefers.
+
+- **Verdict**: the planned fix (steepen the posture term) was aimed at the wrong thing. This is not mispricing, it is an optimisation failure.
+- **Mechanism to test next**: PPO explores with i.i.d. per-step Gaussian noise, but the postural gain only materialises when an abdomen offset is HELD across a whole stride. Independent noise averages it away, so the improvement is never sampled coherently even though it is well inside the exploration range. If that is right, the fix is temporally correlated exploration on the abdomen dimensions, not a reward weight.
+- **Learned, generally**: a cosine-based uprightness metric cannot distinguish the direction of a tilt, and we shipped one as a reward term, a termination condition and a headline dashboard number. Any angular metric needs its sign checked before it is trusted.
 
 ### E22  2026-08-14  Replay ratio 2 vs 16, and a finding that outranks it
 - **Change**: FastTD3 at replay ratio 2 and 16, both async, 50M env steps each, same seed, evals aligned to the same env-step grid.
