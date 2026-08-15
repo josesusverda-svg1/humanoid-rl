@@ -452,7 +452,11 @@ class ThreadedVecEnv:
         request = getattr(self.task, "push_request", None)
         if request is None:
             return np.empty(0, dtype=np.int64)
-        due = request()
+        # Pass THIS env's state. One Task instance is shared by the training, evaluation and
+        # render environments, which have different widths (4096 / 64 / 1), so anything the
+        # task answers per-environment has to be asked about a specific state. A task that
+        # kept the answer on itself would size the array to whichever env initialised last.
+        due = request(self.state)
         if due is None or not np.any(due):
             return np.empty(0, dtype=np.int64)
         idx = np.flatnonzero(due).astype(np.int64)
@@ -460,7 +464,7 @@ class ThreadedVecEnv:
         # WHICH environments, fall back to a planar shove of the configured speed.
         supplied = getattr(self.task, "push_impulse", None)
         if supplied is not None:
-            imp = supplied()
+            imp = supplied(self.state)
             if imp is not None:
                 self._push_vel[idx] = imp[idx]
                 return idx

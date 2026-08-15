@@ -91,6 +91,18 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
 
 Newest first. `E##  date  what changed`.
 
+### E28  2026-08-15  The sitting trap: `upright` rewards a pose that is NOT on the path
+- **Found before spending compute**, by computing the reward at each stage of a rise rather than watching another run fail.
+- **The defect is in the definition, not in a number.** `upright = clip(-gravity_body[2], 0, 1)` measures PELVIS ORIENTATION, which is **not monotone** along the path from floor to stand: maximal sitting, low on all fours and kneeling, maximal again standing. So the route out of a sit runs DOWNHILL, and both previous runs parked in exactly that sit (`pelvis_upright` 0.93, head 0.54, standing 0%).
+- Pelvis HEIGHT is monotone by geometry: an intermediate pose cannot lie outside the interval between lying (~0.15 m) and standing (0.877). It needs no verification, unlike orientation.
+- **Fix**: potential-based shaping on pelvis height, `F = gamma*Phi(s') - Phi(s)`, `Phi = root_height / standing_height`.
+- **Two sizing decisions, both from measurement rather than taste**:
+  - **Weight 150, not 5.** Sitting pays ~0.50/step and the intermediate poses ~0.20, so the route out costs ~0.30/step. Lifting the pelvis 0.35 -> 0.60 m in a second moves Phi by 0.00228/step, so covering the dip needs ~150. At 5 it would have been 0.011/step, three percent of the trap, and would have changed nothing.
+  - **gamma = 1.0, NOT ppo.gamma, and this breaks strict invariance deliberately.** At 0.99 and 125 Hz the `-(1-gamma)*Phi` drain dominates: measured, even rising at 0.3 m/s scored NEGATIVE at weight 5, and at a useful weight it costs 1.5/step just for being upright. At gamma = 1 the sum telescopes exactly, so the shaping over an episode is `weight * (Phi_end - Phi_start)` and nothing else: path length is irrelevant and pumping the pelvis up and down pays exactly zero.
+- **Guard**: an Oracle check fails any config where `weight * (1 - gamma)` exceeds 0.10/step. Verified to bite at gamma 0.99 ("costs 1.50/step") and stay quiet on the real config.
+- **Prediction on the record, before the run**: ~60% he sits and parks again, ~25% reaches occasional stands but cannot hold 2 s, ~15% real successes. The early tell is `knee_max` above 1.2, which the old action range made impossible (ceiling 1.05, peak 1.057).
+- **Also this session**: the ball was built, measured, and then switched off at the user's request; the pose bank was rebuilt with QUOTAS BY OUTCOME (425 each of prone/supine/side-left/side-right) because commanding an orientation is not enough, a body laid on its side often rolls onto its front as it settles.
+
 ### E27  2026-08-15  The knee could not reach a kneel, and the fix was written but never connected
 - **Found by a person watching**: "he bends his knees, leans on his hands and heels, but I do not see him trying to rock or rise. As if he likes hanging there."
 - **Measured, and it is not a preference**:

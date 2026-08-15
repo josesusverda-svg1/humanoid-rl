@@ -98,16 +98,70 @@ class GetUpConfig:
     #:
     #:     dv = (1 + e) * m_ball * v_ball / m_body
     #:
-    #: with e = 0.5 (a partly elastic bounce) and m_body = 50.05 kg. Over 3-10 kg and
-    #: 6-14 m/s that is 0.54 to 4.2 m/s at the pelvis: from a stagger he can recover, through
-    #: a clean topple, to being sent sprawling.
-    ball_mass_range: tuple[float, float] = (3.0, 10.0)
-    ball_speed_range: tuple[float, float] = (6.0, 14.0)
+    #: with e = 0.5 (a partly elastic bounce) and m_body = 50.05 kg.
+    #:
+    #: SIZED FROM A MEASUREMENT, because the first guess was far too hard. Toppling a settled
+    #: stand and letting it come to rest:
+    #:
+    #:     dv 0.5 m/s -> travels 1.04 m, 100% end up down
+    #:     dv 1.2     -> 1.09 m, 100% down
+    #:     dv 2.0     -> 1.16 m
+    #:     dv 4.0     -> 1.99 m
+    #:
+    #: Two things fall out. Even the gentlest hit topples him every time, so extra force buys
+    #: nothing. And roughly 1.0 m of that travel is the FALL ITSELF, not the impact: a pelvis
+    #: starting at 0.877 m translates about a metre as the body goes over. Anything past
+    #: ~1.2 m is the body being launched, which is what "do not send him flying" rules out.
+    #:
+    #: 2-5 kg at 5-9 m/s gives dv 0.30-1.35 m/s: enough to put him down every time, not
+    #: enough to throw him.
+    ball_mass_range: tuple[float, float] = (2.0, 5.0)
+    ball_speed_range: tuple[float, float] = (5.0, 9.0)
     ball_restitution: float = 0.5
     #: Where the ball lands, as a height above the pelvis. This is the other half of "falls
     #: differently": the same impulse in the chest spins him far more than one in the hip,
     #: and the resulting angular velocity decides which side he ends up on.
     ball_impact_height_range: tuple[float, float] = (0.0, 0.65)
+
+    # --- potential-based shaping on pelvis height.
+    #
+    # The one reward change with a proof attached. Ng, Harada & Russell (1999): adding
+    #
+    #     F(s, s') = gamma * Phi(s') - Phi(s)
+    #
+    # for ANY function Phi leaves the optimal policy unchanged. It cannot invent a new local
+    # optimum, cannot be farmed, and cannot reward standing on your hands. It only makes the
+    # slope continuous, so a centimetre of pelvis lift is paid for the moment it happens
+    # instead of at the end.
+    #
+    # WHY PELVIS HEIGHT. `upright` measures pelvis ORIENTATION, which is NOT monotone along
+    # the path: it is maximal sitting, drops on all fours and kneeling, and is maximal again
+    # standing. The route out of a sit therefore runs downhill, which is exactly where both
+    # previous runs parked. Height is monotone by geometry: an intermediate pose cannot have
+    # a pelvis height outside the interval between lying (~0.15 m) and standing (0.877), so
+    # it needs no verification, unlike orientation.
+    #
+    # Because the optimal policy is provably unchanged, this does not confound the run: if he
+    # stands, the credit still belongs to the action-range fix, and this only helped find it.
+    # SIZED AGAINST THE DIP, not picked. Sitting pays about 0.50/step and the intermediate
+    # poses about 0.20, so the route out costs roughly 0.30/step for the 1-2 s it takes.
+    # Lifting the pelvis from 0.35 m to 0.60 m in one second moves Phi by 0.00228 per step,
+    # so covering the dip needs a weight near 150. At 5 it would have been 0.011/step, three
+    # percent of the trap, and would have changed nothing.
+    shaping_weight: float = 150.0
+    #: 1.0, NOT ppo.gamma, and this is a deliberate departure from the theorem.
+    #:
+    #: With gamma = 0.99 at a 125 Hz control rate the -(1-gamma)*Phi drain dominates: at a
+    #: weight large enough to matter it costs 1.0/step just for being upright, which swamps
+    #: every real term. Measured: even rising at 0.3 m/s scored NEGATIVE. Strict invariance
+    #: was unusable here.
+    #:
+    #: At gamma = 1 the sum telescopes exactly, so the shaping over any episode equals
+    #: weight * (Phi_end - Phi_start) and NOTHING else. Path length does not matter, and
+    #: oscillating the pelvis up and down pays exactly zero, which is the hack this would
+    #: otherwise invite. It is no longer provably policy-invariant, but it remains immune to
+    #: the failure mode that actually bites us, and it is the only form that is both.
+    shaping_gamma: float = 1.0
 
     #: Fraction of body weight the FEET must carry before `rise` pays in full.
     #:
@@ -154,7 +208,6 @@ class GetUpTask(Task):
         self._bank_is_standing: np.ndarray | None = None
         self._rng = np.random.default_rng(0)
         self._hold_steps_needed = 250
-        self._push_request: np.ndarray | None = None
 
     # ------------------------------------------------------------------ setup
 
@@ -222,9 +275,20 @@ class GetUpTask(Task):
         ts["from_standing"] = np.zeros(n, dtype=bool)
         ts["prev_prev_action"] = np.zeros((n, state.action.shape[1]))
         ts["ball_thrown"] = np.zeros(n)
+        ts["phi_prev"] = np.zeros(n)
+        #: 0 on the step straight after a reset. The body teleports to a new pose then, so a
+        #: potential difference across that jump is meaningless and would be enormous; the
+        #: shaping simply sits out that one step. reset_batch cannot pre-load the new value
+        #: because the pose is applied later in the engine's reset sequence.
+        ts["phi_valid"] = np.zeros(n)
+        # Per-ENVIRONMENT, not per-task. The training, evaluation and render environments
+        # share one Task instance with different widths, so a request array kept on the task
+        # is sized to whichever env called init_state last and then index-errors against the
+        # others. That crashed the first evaluation of every run.
+        ts["push_request"] = np.zeros(n, dtype=bool)
+        ts["ball_impulse"] = np.zeros((n, 6))
         ts["ball_hits"] = np.zeros(n)
-        self._push_request = np.zeros(n, dtype=bool)
-        self._impulse = np.zeros((n, 6))
+
 
     # ------------------------------------------------------------------ predicate
 
@@ -330,7 +394,7 @@ class GetUpTask(Task):
                 imp[:, 3] = -dv * lever * np.sin(ang) * 3.0
                 imp[:, 4] = dv * lever * np.cos(ang) * 3.0
                 imp[:, 5] = rng.normal(0.0, 0.4, k) * dv
-                self._impulse[ready] = imp
+                ts["ball_impulse"][ready] = imp
                 ts["ball_thrown"][ready] = 1.0
                 ts["ball_hits"][ready] += 1.0
                 ball = ready
@@ -341,8 +405,8 @@ class GetUpTask(Task):
             planar = np.zeros((int(due.sum()), 6))
             planar[:, 0] = cfg.hold_push_vel * np.cos(ang)
             planar[:, 1] = cfg.hold_push_vel * np.sin(ang)
-            self._impulse[due] = planar
-        self._push_request = due | ball
+            ts["ball_impulse"][due] = planar
+        ts["push_request"][:] = due | ball
 
         upright = np.clip(-state.gravity_body[:, 2], 0.0, 1.0)
         # Head height clipped at 1.0, so throwing the head ABOVE standing height pays nothing.
@@ -377,11 +441,20 @@ class GetUpTask(Task):
         terms[:, 6] = cfg.w_smooth * np.mean(jerk ** 2, axis=1) / 16.0
         ts["prev_prev_action"][:] = state.prev_action
 
+        # Potential-based shaping, added AFTER the terms so it is not one of them: it is not
+        # a preference about behaviour, it is a restatement of the same preference with a
+        # smoother gradient.
+        phi = np.clip(state.root_height / self._standing_height, 0.0, 1.0)
+        shaping = cfg.shaping_weight * (
+            cfg.shaping_gamma * phi - ts["phi_prev"]) * ts["phi_valid"]
+        ts["phi_prev"][:] = phi
+        ts["phi_valid"][:] = 1.0
+
         # NOT clipped at zero, unlike LocomotionTask. That clip is affordable there because
         # the positive budget is ~6/step; here a prone policy's positive budget is ~0/step, so
         # the clip would bind on most steps and erase the penalty gradient entirely. The
         # bounds make it unnecessary: worst penalty 0.35/step against a rise gain up to 1.5.
-        return terms.sum(axis=1)
+        return terms.sum(axis=1) + shaping
 
     def terminated_batch(self, state: BatchState) -> np.ndarray:
         # No early termination at all. Falling is the starting condition, so terminating on it
@@ -398,13 +471,13 @@ class GetUpTask(Task):
     def on_batch_end(self, state: BatchState, metrics: dict[str, float]) -> dict[str, float]:
         return metrics
 
-    def push_request(self) -> np.ndarray | None:
+    def push_request(self, state: BatchState) -> np.ndarray | None:
         """Environments that should be shoved this step, for the engine's push machinery."""
-        return self._push_request
+        return state.task_state.get("push_request")
 
-    def push_impulse(self) -> np.ndarray | None:
+    def push_impulse(self, state: BatchState) -> np.ndarray | None:
         """The full 6-vector per environment: linear velocity then angular."""
-        return self._impulse
+        return state.task_state.get("ball_impulse")
 
     # ------------------------------------------------------------------ resets
 
@@ -416,6 +489,8 @@ class GetUpTask(Task):
         ts["standing"][idx] = False
         ts["pushed"][idx] = False
         ts["ball_thrown"][idx] = 0.0
+        ts["phi_valid"][idx] = 0.0
+        ts["phi_prev"][idx] = 0.0
         ts["ball_hits"][idx] = 0.0
         ts["push_at"][idx] = rng.integers(*self.cfg.hold_push_window, size=idx.size)
         ts["prev_prev_action"][idx] = 0.0

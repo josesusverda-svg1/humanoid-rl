@@ -127,3 +127,5 @@ log:
   checkpoint_interval_iterations: 100
   keep_last_checkpoints: 5
   log_interval_iterations: 1
+getup:
+  ball_enabled: false

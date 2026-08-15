@@ -40,7 +40,27 @@ from humanoid_rl.envs.model_prep import prepare  # noqa: E402
 #: Fractions per generator. Policy falls dominate because they are the only on-distribution
 #: source; hand-authored keyframes are small but irreplaceable (the seated-legs-out pose the
 #: user asked about appears in 0 of 600 drop samples and can only get in by hand).
-MIX = {"topple": 0.45, "drop": 0.25, "keyframe": 0.15, "standing": 0.15}
+#: Explicit, balanced coverage of every way a body can lie, rather than whatever the physics
+#: happens to produce. Toppling and dropping are biased: a standing body falls forwards and
+#: backwards far more readily than sideways, so the old mix gave 25% prone against 37% side
+#: split unevenly, and nothing guaranteed left and right were equal.
+#:
+#: `oriented` places the body at a CHOSEN roll angle and lets it settle there, in four equal
+#: clusters with jitter, so every side gets the same share every time.
+MIX = {"oriented": 0.70, "keyframe": 0.15, "standing": 0.15}
+
+#: Roll about the body's long axis once it is horizontal. 0 is face-down, 180 is face-up, and
+#: the two sides sit between. The jitter is what the request "each time at a slightly
+#: different angle, so sometimes it tips towards the belly and sometimes towards the back"
+#: asks for: a pose at 65 degrees is on its side leaning towards its front, one at 115 is on
+#: its side leaning back, and both settle differently.
+ROLL_CLUSTERS = (
+    ("prone", 0.0),
+    ("side_right", 90.0),
+    ("supine", 180.0),
+    ("side_left", 270.0),
+)
+ROLL_JITTER_DEG = 28.0
 
 
 def label_pose(model, data, standing_height: float, standing_head: float) -> str:
@@ -123,6 +143,51 @@ def random_target(model, prepared, rng) -> np.ndarray:
     return prepared.default_joint_pos + rng.uniform(-1.0, 1.0, model.nu) * prepared.action_scale
 
 
+def make_oriented(model, data, prepared, qadr, rng):
+    """Place the body at a chosen roll angle, just above the floor, and let it settle.
+
+    Equal numbers of prone, supine, left-side and right-side, each jittered so the landing is
+    never the same twice and the side poses lean towards the belly or the back.
+
+    Settling is what makes these valid: the pose is dropped from 12 cm with the limbs held at
+    a random target, so the arms and legs arrive where the contact puts them rather than in a
+    mannequin pose. Random joint angles WITHOUT settling self-penetrate, and the contact
+    forces that produces dwarf anything the actuators do.
+    """
+    name, base = ROLL_CLUSTERS[int(rng.integers(0, len(ROLL_CLUSTERS)))]
+    roll = np.radians(base + rng.uniform(-ROLL_JITTER_DEG, ROLL_JITTER_DEG))
+    yaw = rng.uniform(-np.pi, np.pi)
+
+    # Build the rotation from the axes we want, rather than composing three quaternions and
+    # hoping the order is right. Measured: the composed version had no effect at all, every
+    # commanded roll settled into the same 52% prone / 30% right / 15% left mix.
+    #
+    # Pelvis frame: x is the belly direction, y is left, z is toward the head. A lying body
+    # has z horizontal, and the roll angle decides which of x and y faces the floor.
+    #   roll 0   -> belly down   (prone)
+    #   roll 90  -> left up      (right side down)
+    #   roll 180 -> belly up     (supine)
+    #   roll 270 -> left down    (left side down)
+    head = np.array([np.cos(yaw), np.sin(yaw), 0.0])          # body z, horizontal
+    down = np.array([0.0, 0.0, -1.0])
+    side = np.cross(head, down)                                # horizontal, perpendicular
+    body_x = np.cos(roll) * down + np.sin(roll) * side
+    body_x /= np.linalg.norm(body_x)
+    body_y = np.cross(head, body_x)
+    rot = np.column_stack([body_x, body_y, head]).ravel()
+    quat = np.zeros(4)
+    mujoco.mju_mat2Quat(quat, rot)
+
+    data.qpos[:] = prepared.default_qpos
+    data.qvel[:] = 0.0
+    data.qpos[2] = 0.12 + rng.uniform(0.0, 0.06)
+    data.qpos[3:7] = quat
+    # Modest joint noise. Large noise lets the limbs roll the torso off the orientation that
+    # was just chosen, which is how the first version lost control of the mix entirely.
+    data.qpos[qadr] += rng.normal(0.0, 0.12, model.nu)
+    settle(model, data, random_target(model, prepared, rng), qadr, 2.0)
+
+
 def make_topple(model, data, prepared, qadr, rng):
     """Standing, shoved hard enough to fall. The closest cheap proxy for a real fall."""
     data.qpos[:] = prepared.default_qpos
@@ -197,7 +262,7 @@ def make_standing(model, data, prepared, qadr, rng):
     settle(model, data, prepared.default_joint_pos, qadr, 0.5)
 
 
-GENERATORS = {"topple": make_topple, "drop": make_drop,
+GENERATORS = {"oriented": make_oriented, "topple": make_topple, "drop": make_drop,
               "keyframe": make_keyframe, "standing": make_standing}
 
 
@@ -220,38 +285,66 @@ def main() -> int:
     rejected: dict[str, int] = {}
     started = time.perf_counter()
 
-    wanted = {k: int(args.count * v) for k, v in MIX.items()}
-    for gen_name, n_wanted in wanted.items():
-        made = 0
-        attempts = 0
-        while made < n_wanted and attempts < n_wanted * 8:
-            attempts += 1
-            GENERATORS[gen_name](model, data, prepared, qadr, rng)
-            qpos = data.qpos.copy()
-            # 10% keep their momentum, so the still-tumbling case is represented.
-            qvel = data.qvel.copy() if rng.random() < 0.10 else np.zeros(model.nv)
-            # Yaw and xy randomised at BUILD time. Doing it at reset means transforming the
-            # world-frame linear and angular velocities differently, which is a silent wrong
-            # transform waiting to happen.
-            yaw = rng.uniform(-np.pi, np.pi)
-            cy, sy = np.cos(yaw / 2), np.sin(yaw / 2)
-            w, x, y, z = qpos[3:7]
-            qpos[3:7] = [cy * w - sy * z, cy * x - sy * y, cy * y + sy * x, cy * z + sy * w]
-            qpos[0:2] = 0.0
+    # QUOTAS BY OUTCOME, not by intent. A pose is filed under what it actually settled into,
+    # and generation continues until every class is full. Commanding an orientation is not
+    # enough on its own: a body laid on its side sometimes rolls onto its front or back as it
+    # settles, so asking for 25% of each still produced 44% prone and 3% supine. Sampling
+    # until the quota is met is the only way the shares come out equal, and it is robust to
+    # any bias in the generator rather than compensating for one bias in particular.
+    floor_share = 1.0 - MIX["standing"]
+    per_class = int(args.count * floor_share / 4)
+    quota = {"prone": per_class, "supine": per_class,
+             "side_left": per_class, "side_right": per_class,
+             "seated": int(args.count * 0.05),
+             "up_or_mid": int(args.count * MIX["standing"])}
+    have = {k: 0 for k in quota}
+    print("quotas:", quota, flush=True)
 
-            ok, why = is_valid(model, data, qpos, qvel, qadr)
-            if not ok:
-                rejected[why.split()[0]] = rejected.get(why.split()[0], 0) + 1
-                continue
-            data.qpos[:] = qpos
-            data.qvel[:] = qvel
-            kept_q.append(qpos)
-            kept_v.append(qvel)
-            kept_label.append(label_pose(model, data, prepared.standing_height,
-                                         prepared.standing_head_height))
-            kept_gen.append(gen_name)
-            made += 1
-        print(f"  {gen_name:<10} {made:>5}/{n_wanted} kept ({attempts} attempts)", flush=True)
+    attempts = 0
+    limit = args.count * 60
+    while any(have[k] < quota[k] for k in quota) and attempts < limit:
+        attempts += 1
+        # Aim at whichever class is furthest from its quota, then accept whatever comes out.
+        short = max(quota, key=lambda k: quota[k] - have[k])
+        if short == "up_or_mid":
+            make_standing(model, data, prepared, qadr, rng)
+            gen = "standing"
+        elif short == "seated":
+            make_keyframe(model, data, prepared, qadr, rng)
+            gen = "keyframe"
+        else:
+            base = dict(ROLL_CLUSTERS)[short]
+            saved = globals()["ROLL_CLUSTERS"]
+            globals()["ROLL_CLUSTERS"] = ((short, base),)
+            make_oriented(model, data, prepared, qadr, rng)
+            globals()["ROLL_CLUSTERS"] = saved
+            gen = "oriented"
+
+        qpos = data.qpos.copy()
+        qvel = data.qvel.copy() if rng.random() < 0.10 else np.zeros(model.nv)
+        yaw = rng.uniform(-np.pi, np.pi)
+        cy, sy = np.cos(yaw / 2), np.sin(yaw / 2)
+        w, x, y, z = qpos[3:7]
+        qpos[3:7] = [cy * w - sy * z, cy * x - sy * y, cy * y + sy * x, cy * z + sy * w]
+        qpos[0:2] = 0.0
+
+        ok, why = is_valid(model, data, qpos, qvel, qadr)
+        if not ok:
+            rejected[why.split()[0]] = rejected.get(why.split()[0], 0) + 1
+            continue
+        data.qpos[:] = qpos
+        data.qvel[:] = qvel
+        label = label_pose(model, data, prepared.standing_height,
+                           prepared.standing_head_height)
+        if label not in quota or have[label] >= quota[label]:
+            rejected["quota-full"] = rejected.get("quota-full", 0) + 1
+            continue
+        have[label] += 1
+        kept_q.append(qpos)
+        kept_v.append(qvel)
+        kept_label.append(label)
+        kept_gen.append(gen)
+    print("filled:", have, f"({attempts} attempts)", flush=True)
 
     q = np.array(kept_q)
     v = np.array(kept_v)

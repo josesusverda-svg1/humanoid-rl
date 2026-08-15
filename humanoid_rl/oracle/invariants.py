@@ -726,6 +726,20 @@ def getup_hold_and_thresholds_are_reachable(config) -> list[Finding]:
                     f"only {floor:.0%} of the bank is on the floor; the task is mostly "
                     f"resetting into a stand it does not have to earn."))
 
+    # 5. The shaping must telescope. At gamma < 1 the -(1-gamma)*Phi drain scales with the
+    # weight, and at a weight large enough to matter it swamps every real reward term.
+    if cfg.shaping_weight > 0:
+        drain = cfg.shaping_weight * (1.0 - cfg.shaping_gamma)
+        if drain > 0.10:
+            out.append(Finding(
+                Severity.CONTRADICTION, "shaping drain",
+                f"weight {cfg.shaping_weight} at gamma {cfg.shaping_gamma} costs "
+                f"{drain:.2f}/step simply for being upright, against a standing reward near "
+                f"4.3. The shaping would dominate the objective it is meant to assist.",
+                remedy="Use shaping_gamma = 1.0 so the sum telescopes, or cut the weight.",
+                caught_before="Measured at weight 5 and gamma 0.99: rising at 0.3 m/s scored "
+                              "NEGATIVE, because the drain exceeded the progress term."))
+
     return out or [Finding(
         Severity.OK, "getup setup",
         f"hold {round(steps)} steps of a {config.env.max_episode_steps}-step episode, "
