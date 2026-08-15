@@ -444,7 +444,31 @@ class GetUpTask(Task):
         # Potential-based shaping, added AFTER the terms so it is not one of them: it is not
         # a preference about behaviour, it is a restatement of the same preference with a
         # smoother gradient.
-        phi = np.clip(state.root_height / self._standing_height, 0.0, 1.0)
+        # Phi is the LOWER of pelvis height and head height, each as a fraction of standing.
+        #
+        # Pelvis height alone was gamed within 200 iterations, and by exactly the move the
+        # design note claimed was impossible. `rise` is gated on pelvis uprightness so it
+        # cannot pay for a handstand; the SHAPING had no gate at all, so the cheapest way to
+        # collect it was to invert: hips up, head down, balanced on the shoulders. Measured
+        # on the resulting policy: pelvis 0.71 m (81% of standing) with the head at 0.14 m.
+        #
+        # Taking the minimum requires BOTH ends of the body to be off the floor, which is
+        # what "upright" means without going near orientation, and orientation is what is
+        # not monotone along the path. Scored against the poses that policy actually found:
+        #
+        #     pose            pelvis-only   min(pelvis, head)
+        #     inverted           0.81            0.09
+        #     pike/downward dog  0.82            0.50
+        #     kneeling           0.68            0.66
+        #     standing           1.00            1.00
+        #
+        # The inversion drops from nearly-standing to nearly-nothing; the honest poses barely
+        # move.
+        phi = np.minimum(
+            state.root_height / self._standing_height,
+            state.head_height_ratio,
+        )
+        phi = np.clip(phi, 0.0, 1.0)
         shaping = cfg.shaping_weight * (
             cfg.shaping_gamma * phi - ts["phi_prev"]) * ts["phi_valid"]
         ts["phi_prev"][:] = phi

@@ -91,6 +91,24 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
 
 Newest first. `E##  date  what changed`.
 
+### E29  2026-08-15  The shaping was gamed in 200 iterations, by a headstand
+- **Caught by looking**, after the metrics showed an impossible combination: pelvis at 0.804 m (92% of standing) with the head at 0.322 of standing height. The head was BELOW the pelvis.
+- **The policy inverted.** Rendered frames: lying -> pike on hands and feet with the hips up -> balanced head-down with the legs in the air -> folded over. Measured on the resulting policy at 3.2 s: pelvis 0.71 m, head 0.14 m.
+- **My error, and the design note stated the opposite.** E28's comment claims the shaping "cannot reward standing on your hands". That is true of `rise`, which is multiplied by pelvis uprightness. The SHAPING had no gate at all: it paid for bare pelvis height, and inverting is the cheapest way to raise a pelvis. I wrote the guarantee for one term and applied it in my head to another.
+- **Fix**: `Phi = min(pelvis_height / standing_height, head_height_ratio)`. Both ends of the body must be off the floor, which is what upright means without touching orientation, and orientation is the thing that is not monotone along the path.
+- **Scored against the poses that policy actually found**:
+
+| pose | pelvis-only Phi | min(pelvis, head) |
+|---|---|---|
+| inverted | 0.81 | **0.09** |
+| pike / downward dog | 0.82 | 0.50 |
+| kneeling | 0.68 | 0.66 |
+| standing | 1.00 | 1.00 |
+
+The cheat collapses from nearly-standing to nearly-nothing; the honest poses barely move.
+- **Worth keeping**: this run was still the best yet on the thing it was fixed for. `knee_max` reached 1.10 against a hard ceiling of 1.057 in every earlier run, so the action-range fix (E27) is confirmed working. The humanoid is now physically capable of the poses a get-up needs; it just found a faster way to be paid.
+- **Lesson**: a guarantee proved for one term does not transfer to another term in the same function. Every positive needs its own gate, and I now have three instances of exactly this (E03 symmetry, E26 arm-prop, E29 shaping).
+
 ### E28  2026-08-15  The sitting trap: `upright` rewards a pose that is NOT on the path
 - **Found before spending compute**, by computing the reward at each stage of a rise rather than watching another run fail.
 - **The defect is in the definition, not in a number.** `upright = clip(-gravity_body[2], 0, 1)` measures PELVIS ORIENTATION, which is **not monotone** along the path from floor to stand: maximal sitting, low on all fours and kneeling, maximal again standing. So the route out of a sit runs DOWNHILL, and both previous runs parked in exactly that sit (`pelvis_upright` 0.93, head 0.54, standing 0%).
