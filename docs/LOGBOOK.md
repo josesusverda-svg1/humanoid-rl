@@ -38,6 +38,7 @@ Three rules that keep this honest:
 | Weakening gait terms so AMP owns gait shaping | WORSE | E08 | Foot slip 42-51% of travel speed vs 27% baseline, over 7 evals, never trended down. |
 | Velocity-scaled swing-height target (KSLC) | NO EFFECT | E15 | Measured on our own mocap: mean swing clearance is `0.063 + 0.020*speed`. Worth ≤0.03/step across the whole envelope. Not our problem. |
 | `difficulty_init = 0.45` | WORSE | E13 | On the OLD crushed envelope this meant 0.17 m/s commands, cheaper to ignore than follow. Retried at 0.7 on the fixed envelope: E17. |
+| Abdomen exploration floor to fix the fold | INCONCLUSIVE | E24 | Underpowered by 2x: MDE 0.38 against a predicted 0.16. All 7 arms still folded backward 34-68 deg, so the fold is structural, not exploratory. |
 | Steepening the torso posture reward | NO EFFECT expected | E23 | Measured counterfactual: straightening RAISES reward +0.13/step at equal speed. Reward already prefers upright; the problem is optimisation, not pricing. |
 | Reward normalisation to rescue FastTD3 | NO EFFECT | E22c | Critic measured unsaturated: 4.7e-16 mass on the top atom, 65 of 401 atoms in use. Scale is not the problem. |
 | Single-run A/B on training outcome | INVALID | E22b | Byte-identical configs gave 323 vs 2451 mean return. Any effect under ~7x is inside the noise. |
@@ -88,6 +89,24 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
 ## Entries
 
 Newest first. `E##  date  what changed`.
+
+### E24  2026-08-14  Abdomen exploration floor: INCONCLUSIVE, and I should have known before running
+- **Hypothesis**: the 48 degree backward waist fold persists because `abdomen_y` has the lowest exploration of all 28 action dimensions (std 0.196 against a mean of 0.889), so PPO never samples its way out.
+- **Design**: 2 arms (control, `explore_floor = -0.70` on abdomen dims 0/1/2) x 3 seeds x 350 iterations, warm-started from the envelope best.pt, all seven checkpoints scored under an identical held 1.0 m/s command.
+- **Result**, held-command scoring:
+
+| arm | torso_upright | | | mean | sd |
+|---|---|---|---|---|---|
+| control | 0.8275 | 0.7041 | 0.5589 | 0.697 | 0.134 |
+| floored | 0.3730 | 0.5389 | 0.7390 | 0.550 | 0.183 |
+| baseline (untrained warm start) | 0.6578 | | | | |
+
+- Difference (floored - control) = **-0.147, SE 0.131, t = -1.12 on ~4 df, 95% CI -0.51 to +0.22.** Spans zero comfortably.
+- **Verdict**: INCONCLUSIVE. The hypothesis is not supported, and it is not refuted either.
+- **The process failure, which is the real lesson.** With the control sd of 0.134, three seeds per arm can only detect an effect of about **0.38**. The effect I was chasing, from the open-loop counterfactual, was about **0.16**. The experiment was underpowered by more than a factor of two BEFORE it ran, and computing that takes one line of arithmetic I did not do. E22b had already warned me the noise on this machine is enormous; I applied that warning to the choice of metric and not to the sample size. Detecting 0.16 here needs roughly **17 seeds per arm**, about 6 hours.
+- **What DID come out of it, and it is worth more than the experiment.** All seven checkpoints, across both treatments and three seeds, fold **BACKWARD**, between 34 and 68 degrees, with a consistent leftward roll (lateral +0.31 to +0.46). Not one arm under any condition came out upright. So the backward-left fold is a **systematic property of this reward and this body**, not a random local optimum that a nudge to exploration could escape. That reframes the fix: it is structural, not exploratory.
+- **Also note**: control seeds span 0.559 to 0.828 on posture from byte-identical configs. E22b's noise floor is confirmed to apply to `torso_upright`, not just to episode return.
+- **Rule adopted**: compute the minimum detectable effect BEFORE launching any arm, and write it in the plan next to the predicted effect. If MDE > predicted effect, the experiment does not run.
 
 ### E23  2026-08-14  The lean: three of my claims were wrong, and it is not a reward problem
 - **What I claimed**: the humanoid leans FORWARD at torso_upright 0.54, exploiting the termination boundary at 0.50, because the reward prices speed above posture roughly 2:1.

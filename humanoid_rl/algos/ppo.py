@@ -123,6 +123,12 @@ class PPOConfig:
     log_std_max: float = 0.0
 
     # --- adaptive learning rate ---
+    #: Per-dimension exploration floor: which action indices, and the minimum log_std.
+    #: A scalar floor cannot express "one dimension collapsed while 27 are healthy", which
+    #: is what was measured on the best policy (abdomen_y std 0.196 against a 28-dim mean of
+    #: 0.889). Empty tuple disables it entirely.
+    explore_floor_dims: tuple[int, ...] = ()
+    explore_floor: float = -5.0
     adaptive_lr: bool = True
     desired_kl: float = 0.01
     lr_min: float = 1.0e-5

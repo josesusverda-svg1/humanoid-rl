@@ -27,6 +27,7 @@ for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECL
 
 import argparse
 import signal
+import math
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -89,6 +90,15 @@ class Trainer:
             init_noise_std=config.network.init_noise_std,
             log_std_max=config.ppo.log_std_max,
         ).to(self.device)
+
+        # Set here, right after the policy exists and BEFORE any warm start, so that
+        # init_policy_from's clamp_log_std enforces the floor on the loaded weights too.
+        if config.ppo.explore_floor_dims:
+            self.policy.set_explore_floor(
+                config.ppo.explore_floor_dims, config.ppo.explore_floor)
+            print(f"exploration floor: log_std >= {config.ppo.explore_floor:+.2f} "
+                  f"(std {math.exp(config.ppo.explore_floor):.3f}) on action dims "
+                  f"{list(config.ppo.explore_floor_dims)}")
 
         # Adversarial motion prior. Owns the discriminator, its optimiser, the policy
         # replay buffer and the reference sampler. Only built for the amp task.
