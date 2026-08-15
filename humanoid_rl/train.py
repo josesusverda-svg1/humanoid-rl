@@ -370,7 +370,14 @@ class Trainer:
             from humanoid_rl.viz import skeleton
 
             env = self._get_render_env()
-            capture = skeleton.capture(env, self.policy, self.device)
+            # A get-up starts on the floor, so the walking view set (six angles around an
+            # upright body) mostly shows a silhouette. Use the sagittal-biased set and a
+            # longer window: the rise takes several seconds, a stride takes one.
+            extra = {}
+            if self.cfg.run.task == "getup":
+                extra = {"views": skeleton.GETUP_VIEWS, "seconds": 6.0, "settle": 0.0,
+                         "max_frames": 90}
+            capture = skeleton.capture(env, self.policy, self.device, **extra)
             path = skeleton.write(
                 capture,
                 self.logger.run_dir / "skeletons" / f"iter_{self.iteration:08d}.json",
@@ -397,6 +404,14 @@ class Trainer:
         try:
             env = self._get_render_env()
             out = self.logger.video_dir / f"iter_{self.iteration:08d}_{tag}.mp4"
+            # The walking camera sits high and follows the heading, which for a body on the
+            # floor frames mostly empty ground. Drop it and pull back for the get-up task.
+            camera = None
+            if self.cfg.run.task == "getup":
+                from humanoid_rl.render import CameraConfig
+
+                camera = CameraConfig(distance=3.0, elevation=-8.0, azimuth=100.0,
+                                      height_offset=0.55)
             t0 = time.perf_counter()
             result = render_episode(
                 env,
@@ -404,6 +419,7 @@ class Trainer:
                 self.device,
                 out,
                 schedule=SHORT_SCHEDULE,
+                camera=camera,
                 width=cfg.video_width,
                 height=cfg.video_height,
                 fps=cfg.video_fps,

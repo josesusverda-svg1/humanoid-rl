@@ -199,7 +199,12 @@ def render_episode(
     with mujoco.Renderer(env.model, height=height, width=width) as renderer:
         for step, (command, label) in enumerate(track):
             # Override the sampled command so the video follows the script.
-            env.state.task_state["command"][0] = command
+            # Tasks without a velocity command (get-up) have no such key. Writing it
+            # unconditionally raised KeyError, and because visualisation failures are
+            # swallowed so they cannot kill a long run, the get-up run produced ZERO
+            # videos and zero flip-books for 2000 iterations while reporting nothing.
+            if "command" in env.state.task_state:
+                env.state.task_state["command"][0] = command
             env._compute_obs()  # noqa: SLF001 - refresh the command in the observation
             obs = env._obs.copy()  # noqa: SLF001
 

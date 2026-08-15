@@ -116,7 +116,7 @@ eval:
   interval_iterations: 50
   num_episodes: 32
   num_envs: 64
-  video_every_n_evals: 5
+  video_every_n_evals: 10
   video_on_best: true
   video_width: 640
   video_height: 480
