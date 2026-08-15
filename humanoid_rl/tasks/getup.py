@@ -419,8 +419,21 @@ class GetUpTask(Task):
         # uprightness: height that the legs did not pay for should not be bought. Ramped
         # rather than a hard threshold, so there is a gradient toward loading the feet at
         # all rather than a cliff the policy has to jump.
+        # TWICE THE LESSER foot, not the sum. Identical to the sum when the load is even
+        # (0.5 BW each gives 1.0 either way) and zero the moment one foot is unloaded.
+        #
+        # Measured on the previous run: total load cleared 60% of body weight 47.7% of the
+        # time, but each foot cleared 20% only 7.5% of the time. The gap IS the defect: the
+        # weight was there, all of it on one leg. Splaying wide and hopping are the same
+        # failure seen from other angles, since a body that cannot balance on two feet either
+        # widens its base or passes through the pose ballistically.
+        #
+        # Known cost, stated rather than discovered later: a half-kneel (one foot planted,
+        # one knee down) is a legitimate stage of a human get-up and now pays zero rise. The
+        # pelvis-height shaping still covers that stretch, and this humanoid was rising from a
+        # two-footed crouch rather than through a half-kneel anyway.
         foot_load = np.clip(
-            state.foot_force[:, :2].sum(axis=1)
+            2.0 * state.foot_force[:, :2].min(axis=1)
             / (cfg.rise_foot_load_bw * self._body_weight), 0.0, 1.0)
         rise = upright * foot_load * (np.expm1(3.0 * h) / np.expm1(3.0))
 
