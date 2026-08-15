@@ -63,7 +63,12 @@ def label_pose(model, data, standing_height: float, standing_head: float) -> str
     if g[0] <= -0.60:
         return "supine"
     if abs(g[1]) >= 0.60:
-        return "side"
+        # Split by WHICH side. The obvious `abs(g[1]) >= 0.60` collapses left and right into
+        # one label, so a bank that had drifted entirely onto one shoulder would report a
+        # healthy "side: 454" and nothing would flag it. This project has already shipped one
+        # sign-blind angular metric (torso_upright is cos(tilt)) and spent a full analysis
+        # cycle believing a backward fold was a forward lean.
+        return "side_left" if g[1] > 0 else "side_right"
     if g[2] <= -0.70:
         return "seated"
     return "low"

@@ -703,6 +703,22 @@ def getup_hold_and_thresholds_are_reachable(config) -> list[Finding]:
                 f"bank nq {int(data['nq'])} against model nq {prepared.model.nq}",
                 remedy="Rebuild the bank for this model."))
         else:
+            # Left/right balance. The humanoid is bilaterally symmetric, so a bank that
+            # lands mostly on one shoulder trains a policy that can only rise one way, and
+            # the class counts alone will not show it if the label uses abs().
+            lab = data["label"]
+            left = int((lab == "side_left").sum())
+            right = int((lab == "side_right").sum())
+            if left + right >= 20:
+                share = left / (left + right)
+                if not 0.35 <= share <= 0.65:
+                    out.append(Finding(
+                        Severity.SUSPECT, "pose bank balance",
+                        f"side-lying poses are {share:.0%} left-down against {1-share:.0%} "
+                        f"right-down ({left} vs {right}). A bilaterally symmetric body should "
+                        f"see both roughly equally.",
+                        remedy="Rebuild the bank, or check the topple generator's impulse "
+                               "direction sampling."))
             floor = float((data["generator"] != "standing").mean())
             if floor < 0.5:
                 out.append(Finding(
