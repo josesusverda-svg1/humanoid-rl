@@ -165,6 +165,15 @@ def render_episode(
     was_training = policy.training
     policy.eval()
 
+    # Does this task take a velocity command at all? Same condition as the write below, so
+    # the overlay and the environment can never disagree about what the policy was told.
+    commanded = "command" in env.state.task_state
+    body_weight = float(env.model.body_mass.sum() * 9.81)
+    knee_adr = np.array([
+        env.prepared.actuator_qpos_adr[i]
+        for i, n in enumerate(env.prepared.joint_names) if "knee" in n
+    ][:2] or [7, 8])
+
     obs = env.reset()
     data = env.datas[0]
 
@@ -240,16 +249,36 @@ def render_episode(
 
             if overlay:
                 contact = "".join("#" if c else "." for c in env.state.foot_contact[0])
-                frame = _overlay(
-                    frame,
-                    [
+                if commanded:
+                    lines = [
                         f"t {step * env.dt:5.1f}s   {label}",
                         f"cmd  vx {command[0]:+.2f}  vy {command[1]:+.2f}  yaw {command[2]:+.2f}",
                         f"act  speed {speed:4.2f} m/s   slip {slip:4.2f} m/s",
                         f"feet [{contact}]   height {float(data.qpos[2]):4.2f} m",
-                    ],
-                    font,
-                )
+                    ]
+                else:
+                    # A task with no velocity command gets telemetry about what it IS doing.
+                    #
+                    # The alternative was already shipping and was worse than showing nothing:
+                    # get-up videos carried "walk forward" and "cmd vx +1.00" straight from the
+                    # walking schedule, while the policy received no command at all. Anyone
+                    # watching would conclude the humanoid was being told to walk and failing.
+                    # An overlay that reports a command the policy never saw is not a cosmetic
+                    # problem, it is a wrong measurement drawn on top of the evidence.
+                    st = env.state
+                    load = float(st.foot_force[0, :2].sum()) / max(body_weight, 1e-9)
+                    hands = min(float(st.key_body_pos[0, 2, 2]),
+                                float(st.key_body_pos[0, 3, 2]))
+                    lines = [
+                        f"t {step * env.dt:5.1f}s   no velocity command",
+                        f"head {float(st.head_height_ratio[0]):4.2f}  "
+                        f"pelvis {float(np.clip(-st.gravity_body[0, 2], 0, 1)):4.2f}  "
+                        f"root {float(data.qpos[2]):4.2f} m",
+                        f"feet [{contact}] load {load:4.2f} BW   hands {hands:4.2f} m",
+                        f"knee {float(np.max(st.qpos[0, knee_adr])):4.2f} rad   "
+                        f"spin {float(np.degrees(abs(st.qvel[0, 5]))):4.0f} d/s",
+                    ]
+                frame = _overlay(frame, lines, font)
             frames.append(frame)
 
     if was_training:
