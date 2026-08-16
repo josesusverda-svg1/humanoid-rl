@@ -97,11 +97,19 @@ def main() -> int:
                 renderer.update_scene(data, camera=cam)
                 frames.append((steps[step], renderer.render().copy()))
                 st = env.state
-                load = float(st.foot_force[0, :2].sum()) / float(model.body_mass.sum() * 9.81)
+                # Height-masked, like the reward and the predicate (E34): the raw sensor
+                # prints multi-BW ghosts on airborne frames, and an instrument that
+                # disagrees with the paid one misleads exactly when it matters.
+                fz0 = st.key_body_pos[0, 0:2, 2]
+                masked = np.where(fz0 <= 0.10, st.foot_force[0, :2], 0.0)
+                load = float(masked.sum()) / float(model.body_mass.sum() * 9.81)
                 hands = min(float(st.key_body_pos[0, 2, 2]), float(st.key_body_pos[0, 3, 2]))
+                # The KNEES, not a max over all 28 joints (the old column was hip flexion
+                # as often as knee).
+                knee = float(np.max(st.qpos[0, env.task._knee_qadr]))  # noqa: SLF001
                 print(f"{steps[step]:>5.1f}s{float(data.qpos[2]):>9.3f}"
                       f"{float(st.head_height_ratio[0]):>8.2f}{load:>9.2f}"
-                      f"{float(np.max(st.qpos[0, env.prepared.actuator_qpos_adr])):>7.2f}"
+                      f"{knee:>7.2f}"
                       f"{hands:>8.2f}")
             action = policy.act_deterministic(
                 torch.as_tensor(obs, dtype=torch.float32, device=device))

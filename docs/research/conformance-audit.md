@@ -10,14 +10,43 @@ Verdicts:
 
 ---
 
+## RETRACTION, added 2026-08-15 (E31). READ THIS BEFORE USING ANY ROW BELOW.
+
+**The OURS column's control rate was wrong, and it is the single source of a family of bugs.**
+
+This audit recorded ours as `50 Hz (200 Hz phys, decim 4)`. Measured from the shipped scene:
+`humanoid_scene.xml` has `timestep 0.002` (**500 Hz** physics) and `decimation 4`, so the real
+control rate is **125 Hz** and one control step is **8 ms**. The same wrong rate was written
+into a comment on `model_prep.py`, the function that loads that very model, so nothing in the
+repo contradicted it.
+
+Every verdict below that compares a per-step or per-second quantity against a 50 Hz reference
+therefore compared the wrong thing, and "ALIGNED (G1 exactly)" was the most wrong of all: G1
+runs at 50 Hz, we run 2.5x faster. Rows signed off by this audit that are now known bad:
+
+| Row | Said | Actually |
+|---|---|---|
+| Policy rate | 50 Hz, ALIGNED with G1 exactly | **125 Hz**, 2.5x faster than every reference in the table |
+| Episode length | 20 s (1000 steps) | 1000 steps was **8 s** at 125 Hz. Fixed to 2500 steps (E19). |
+| `gamma` 0.99 | ALIGNED | 0.99 buys the references a 1.67-3.33 s horizon and buys us **0.80 s** (E31) |
+| `horizon` 24 | ALIGNED | 0.48-0.60 s at the references, **0.19 s** here. Not yet changed; logged. |
+| Per-step reward weights | ALIGNED | Accumulate 2.5x faster per second here. The references multiply reward by `dt`; this repo does not. |
+
+**Rule going forward: never compare a constant, compare the quantity it stands for.** A
+discount factor is not a number, it is a horizon in seconds. An episode limit is not a step
+count, it is a duration. Before adopting any value from another repo, convert it through that
+repo's control rate and ours.
+
+---
+
 ## A) Row-by-row table
 
 ### Control / actuation
 
 | Parameter | OURS | XBOT | G1 | T1 | Verdict |
 |---|---|---|---|---|---|
-| Policy rate | 50 Hz (200 Hz phys, decim 4) | 100 Hz (1000 Hz, decim 10) | 50 Hz (200 Hz, decim 4) | 50 Hz (500 Hz, decim 10) | **ALIGNED** (G1 exactly) |
-| Episode length | 20 s (1000 steps) | 24 s | 20 s | 30 s | **ALIGNED** (G1) |
+| Policy rate | **125 Hz (500 Hz phys, decim 4)** | 100 Hz (1000 Hz, decim 10) | 50 Hz (200 Hz, decim 4) | 50 Hz (500 Hz, decim 10) | ~~ALIGNED (G1 exactly)~~ **RETRACTED E31**: faster than all three. |
+| Episode length | 20 s (2500 steps) | 24 s | 20 s | 30 s | **ALIGNED** (G1), but only after E19 fixed 1000 steps, which was 8 s here. |
 | Action semantics | [-1,1] × per-joint scale + default pose, position servos | 0.25·a + default, PD torque | 0.25·a + default, PD torque | 1.0·a + default, clip 1.0, PD torque | **ALIGNED** (T1-style unit actions). Structural note: refs compute explicit PD torque and clip to torque limits; ours relies on MuJoCo position actuators + ctrlrange clamp (see E) |
 | Action low-pass filter (8 Hz one-pole in plant) | yes | no (random delay-blend + mult. noise instead) | no | no (random 0–18 ms delay instead) | **JUSTIFIED-DIVERGENCE** — measured noise-crutch: falls 2% with 62 Hz noise vs 100% deterministic. But see "actuator latency DR" row: refs model *random delay*, which we lack |
 | Actuator latency DR | none | per-step random delay-blend delay∈[0,0.5] | none | per-env delay 0–18 ms, resampled each reset | **CONFORM** (adopt T1 per-env delay; 2/3 refs model latency; our fixed 8 Hz filter is deterministic and learnable — a random delay is what breaks delay-exploitation) |

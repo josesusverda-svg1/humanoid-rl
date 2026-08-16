@@ -91,7 +91,10 @@ def main() -> int:
     # --- every metric the watchers read actually exists
     need = ["standing_frac", "held_ever_frac", "time_to_fall_frac", "hold_progress",
             "head_height_ratio", "root_height", "pelvis_upright", "foot_load_bw",
-            "hand_height_gap", "hands_down_frac", "knee_max", "spin_deg_s", "ball_hits"]
+            "hand_height_gap", "hands_down_frac", "knee_max", "spin_deg_s", "ball_hits",
+            # E34 watch surface: corridor openness, the wide-brace detector, and the
+            # jump-death signal (fraction of steps above the 1 m/s free line).
+            "gate_frac", "foot_sep", "launch_overspeed_frac"]
     missing = [k for k in need if k not in m]
     check("all watched metrics exist", not missing, f"missing {missing}" if missing else "")
 

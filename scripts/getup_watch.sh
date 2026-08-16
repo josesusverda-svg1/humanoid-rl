@@ -19,7 +19,12 @@ RUN=${1:-$(ls -td runs/getup-* 2>/dev/null | head -1)}
 echo "=============================================================="
 echo "  $RUN    $(date +%H:%M:%S)"
 echo "=============================================================="
-tail -1 /tmp/getup*.log 2>/dev/null | tail -1
+# The NEWEST log by mtime, not whatever the glob happens to sort last. There are nine
+# /tmp/getup*.log files and `tail -1 /tmp/getup*.log | tail -1` picked the right one only
+# because '_' sorts after '8' in ASCII. This project has already lost nine minutes to
+# watching a stale object (getup_snapshot.py rendering best.pt); once is enough.
+LOG=$(ls -t /tmp/getup*.log 2>/dev/null | head -1)
+[ -n "$LOG" ] && tail -1 "$LOG"
 
 .venv/bin/python - "$RUN" <<'PY'
 import json, sys
@@ -36,13 +41,17 @@ if not rows:
     print("no evaluations yet"); raise SystemExit(0)
 
 g = lambda r, k: r.get(k, 0.0) or 0.0
-print(f"\n{'iter':>6}{'knee':>7}{'pelvis':>8}{'head':>7}{'feet':>7}{'hands_dn':>10}"
-      f"{'spin':>7}{'stand%':>8}{'held%':>7}{'return':>8}")
+# ovspd% is the E34 jump-death signal: the E33 jumper ran ~60% of steps above the 1 m/s
+# upward line, a human get-up ~0%. gate% is how open the lift corridor is.
+print(f"\n{'iter':>6}{'lvl':>4}{'knee':>7}{'pelvis':>8}{'head':>7}{'feet':>7}{'gate%':>7}"
+      f"{'ovspd%':>8}{'stand%':>8}{'strict%':>8}{'held%':>7}{'return':>8}")
 for r in rows[-10:]:
-    print(f"{r['iteration']:>6.0f}{g(r,'eval/knee_max'):>7.2f}{g(r,'eval/root_height'):>8.3f}"
+    print(f"{r['iteration']:>6.0f}{g(r,'eval/exam_level'):>4.0f}{g(r,'eval/knee_max'):>7.2f}"
+          f"{g(r,'eval/root_height'):>8.3f}"
           f"{g(r,'eval/head_height_ratio'):>7.2f}{g(r,'eval/foot_load_bw'):>7.2f}"
-          f"{g(r,'eval/hands_down_frac'):>9.0%}{g(r,'eval/spin_deg_s'):>7.0f}"
-          f"{g(r,'eval/standing_frac'):>7.1%}{g(r,'eval/held_ever_frac'):>7.1%}"
+          f"{g(r,'eval/gate_frac'):>7.0%}{g(r,'eval/launch_overspeed_frac'):>8.1%}"
+          f"{g(r,'eval/standing_frac'):>7.1%}{g(r,'eval/standing_frac_strict'):>8.1%}"
+          f"{g(r,'eval/held_ever_frac'):>7.1%}"
           f"{g(r,'eval/episode_return'):>8.0f}")
 
 first, last = rows[0], rows[-1]

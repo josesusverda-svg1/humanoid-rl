@@ -85,8 +85,12 @@ def main() -> int:
             s = env.state
             fore, side = task._lean(s)   # noqa: SLF001
             bw = task._body_weight       # noqa: SLF001
-            F = s.foot_force[:, :2]
             fz, hz = s.key_body_pos[:, 0:2, 2], s.key_body_pos[:, 2:4, 2]
+            # HEIGHT-MASKED, matching _standing_parts (E34): the raw sensor reads multi-BW
+            # ghosts from mid-air self-contact, and this script's whole job is per-clause
+            # blocker attribution. Measured unmasked vs masked on the E32 launch policy:
+            # clause 7 over-reported 405 vs 317 steps, clause 8 22 vs 12.
+            F = np.where(fz <= g.u_foot_height, s.foot_force[:, :2], 0.0)
             knee = s.qpos[:, task._knee_qadr]  # noqa: SLF001
             rel = s.key_body_pos[:, 0, :2] - s.key_body_pos[:, 1, :2]
             sep = np.linalg.norm(rel, axis=1)
