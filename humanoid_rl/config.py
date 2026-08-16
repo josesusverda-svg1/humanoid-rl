@@ -57,6 +57,12 @@ class EnvConfig:
     #: policy, the standard rate for locomotion control.
     decimation: int = 4
     max_episode_steps: int = 1000
+    #: Randomise each env's FIRST episode length so truncations do not all land on the same
+    #: step. Matters for tasks with no early termination (get-up), where synchronized
+    #: truncation makes reset-tied machinery arrive in bursts once per episode-length of
+    #: iterations (E34: standing starts delivered reward/stand = 0.0 in 332 of 349
+    #: iterations). Keep False for evaluation envs: staggering biases episode returns.
+    stagger_initial_episodes: bool = False
     #: How a policy action maps to a joint-angle offset.
     #:
     #: "fraction" (default) gives 0.6 of each joint's half-range, which covers 56.2% of joint

@@ -736,7 +736,9 @@ def getup_hold_and_thresholds_are_reachable(config) -> list[Finding]:
                 f"weight {cfg.shaping_weight} at gamma {cfg.shaping_gamma} costs "
                 f"{drain:.2f}/step simply for being upright, against a standing reward near "
                 f"4.3. The shaping would dominate the objective it is meant to assist.",
-                remedy="Use shaping_gamma = 1.0 so the sum telescopes, or cut the weight.",
+                remedy="Cut the weight. Do NOT reach for shaping_gamma = 1.0: this remedy "
+                       "used to say that, and it is exactly the reward pump that "
+                       "shaping_gamma_matches_rl_gamma now forbids (E31).",
                 caught_before="Measured at weight 5 and gamma 0.99: rising at 0.3 m/s scored "
                               "NEGATIVE, because the drain exceeded the progress term."))
 
@@ -789,6 +791,200 @@ def exploration_has_a_ceiling(config) -> list[Finding]:
     return out or [Finding(
         Severity.OK, "exploration ceiling",
         f"std capped at {ceiling:.2f}, starting from {init}")]
+
+
+@check
+def external_impulses_cannot_void_the_hold(config) -> list[Finding]:
+    """No impulse the setup itself injects may violate the success predicate by arithmetic.
+
+    The get-up hold requires |v| <= u_lin_speed CONSECUTIVELY for hold_seconds. Two mechanisms
+    write velocity straight into qvel, bypassing the actuators, so no policy can resist them:
+    the task's own hold shove, and the domain-randomisation push. If either exceeds the speed
+    cap without a corresponding forgiveness, the predicate is unsatisfiable BY CONSTRUCTION
+    and every run is optimising toward a goal that cannot be reached.
+
+    E33: hold_push_vel 0.6 against u_lin_speed 0.4, no grace, fired inside every attempt at
+    step 40-140 of the 250 needed, and the miss re-armed it. Twelve runs read standing_frac
+    exactly 0.0% and the conclusion drawn each time was about the reward. Measured: a perfect
+    stand reached 186/250 with the shove on and 330/250 with it off.
+
+    The comparison is between independently specified things: an impulse magnitude (task or
+    engine setting), a predicate threshold (task setting), and the forgiveness bookkeeping.
+    """
+    if getattr(config.run, "task", "") != "getup":
+        return []
+    cfg = config.getup
+    out: list[Finding] = []
+
+    grace = int(getattr(cfg, "hold_push_grace", 0))
+    if cfg.hold_push_vel > cfg.u_lin_speed and grace <= 0:
+        out.append(Finding(
+            Severity.CONTRADICTION, "hold vs task shove",
+            f"hold_push_vel {cfg.hold_push_vel} m/s is written into qvel against a "
+            f"u_lin_speed cap of {cfg.u_lin_speed}, with no grace window. The shove violates "
+            f"the hold by arithmetic on every attempt; no policy can complete it, ever.",
+            remedy="Set hold_push_grace to ~0.4 s of steps (forgiving ONLY the velocity "
+                   "conjunct), or push below the cap.",
+            caught_before="E33: twelve runs with standing_frac exactly 0.0%.",
+        ))
+
+    # The engine push is invisible to the task, so NO grace can cover it. Its ceiling has to
+    # clear the cap with room for the quiet-stand velocity (~0.05 m/s measured).
+    if config.domain_rand.enabled and config.domain_rand.push_vel_xy > 0.85 * cfg.u_lin_speed:
+        out.append(Finding(
+            Severity.CONTRADICTION, "hold vs domain-rand push",
+            f"domain_rand.push_vel_xy {config.domain_rand.push_vel_xy} m/s against a "
+            f"u_lin_speed cap of {cfg.u_lin_speed}. The engine push is invisible to the task "
+            f"(no flag reaches it), so the grace window cannot cover it and part of all hold "
+            f"attempts die to a disturbance no policy could survive.",
+            remedy=f"Keep push_vel_xy at or below {0.85 * cfg.u_lin_speed:.2f} "
+                   f"(0.85x the cap, leaving margin for quiet-stand velocity).",
+            caught_before="E33: at 0.7 roughly a third of hold windows were voided.",
+        ))
+
+    # The grace must forgive a settling transient, not the hold itself.
+    if grace > 0:
+        from humanoid_rl.envs.model_prep import prepare
+        prepared = prepare(Path(__file__).resolve().parents[2] / config.env.model_path)
+        dt = float(prepared.model.opt.timestep) * config.env.decimation
+        hold_steps = cfg.hold_seconds / dt
+        if grace >= 0.5 * hold_steps:
+            out.append(Finding(
+                Severity.CONTRADICTION, "grace vs hold",
+                f"hold_push_grace {grace} steps is {grace/hold_steps:.0%} of the "
+                f"{hold_steps:.0f}-step hold. Forgiving that much of the hold's own clock "
+                f"stops it being a hold.",
+                remedy="Keep the grace well under half the hold, ~0.4 s.",
+            ))
+    return out or [Finding(
+        Severity.OK, "external impulses",
+        f"shove {cfg.hold_push_vel} graced {grace} steps (velocity conjunct only); "
+        f"engine push {config.domain_rand.push_vel_xy} under the {cfg.u_lin_speed} cap")]
+
+
+@check
+def discount_horizon_covers_the_task(config) -> list[Finding]:
+    """The discount horizon must be longer than the longest thing the task asks for.
+
+    `gamma` is dimensionless per STEP, so its meaning in seconds depends entirely on the
+    control rate. Copying it between repos at different rates silently changes the horizon,
+    and nothing anywhere in the code will complain.
+
+    E31: `gamma = 0.99` was taken from legged_gym, which runs at 50 Hz and therefore gets a
+    2.0 s horizon from it. This repo runs at 125 Hz, where the same number is 0.80 s. The
+    get-up task asks the humanoid to stand and HOLD for 2.0 s: at that discount a successful
+    hold is worth 0.081 of an immediate reward, and a 4 s get-up followed by the hold is worth
+    0.00053. The task's own success criterion sat outside the agent's horizon for every
+    get-up run in the project, so no reward change could ever have reached it.
+
+    Same root as E19, where `max_episode_steps = 1000` was copied from 50 Hz and produced 8 s
+    episodes while every comment in the repo said 20 s.
+
+    The comparison is between two INDEPENDENTLY specified things: gamma (an algorithm setting)
+    and the duration the task requires (a task setting), coupled only through the physics
+    timestep and decimation.
+    """
+    from humanoid_rl.envs.model_prep import prepare
+
+    ppo = config.ppo
+    if ppo.gamma >= 1.0:
+        return [Finding(
+            Severity.CONTRADICTION, "discount horizon",
+            f"gamma {ppo.gamma} is not below 1, so the discounted return need not converge.",
+            remedy="Use gamma < 1.")]
+
+    prepared = prepare(Path(__file__).resolve().parents[2] / config.env.model_path)
+    dt = float(prepared.model.opt.timestep) * config.env.decimation
+    horizon_s = dt / (1.0 - ppo.gamma)
+
+    # What the task actually asks for, in seconds. Each entry is (name, seconds).
+    needs: list[tuple[str, float]] = []
+    if getattr(config.run, "task", "") == "getup":
+        hold = float(config.getup.hold_seconds)
+        # A get-up is the hold PLUS the rise that has to precede it. Measured on this project's
+        # own rollouts, a rise takes 2-4 s from supine, so the episode's payoff sits at least
+        # hold + 2 s away from the reset state.
+        needs.append(("the hold alone", hold))
+        needs.append(("a rise plus the hold", hold + 2.0))
+    else:
+        # Walking is cyclic: the longest thing it asks for is a full gait cycle, after which
+        # the state repeats and a short horizon is genuinely enough.
+        freq = getattr(config.task, "gait_frequency", None)
+        if freq:
+            needs.append(("one gait cycle", 1.0 / float(freq)))
+
+    out: list[Finding] = []
+    for name, seconds in needs:
+        if horizon_s < seconds:
+            weight = ppo.gamma ** (seconds / dt)
+            out.append(Finding(
+                Severity.CONTRADICTION, "discount horizon",
+                f"gamma {ppo.gamma} at {1/dt:.0f} Hz is a {horizon_s:.2f} s horizon, but the "
+                f"task needs {name} at {seconds:.1f} s. A reward that far away is discounted "
+                f"to {weight:.4f}, so the agent is being asked for something it cannot see.",
+                remedy=f"Set gamma to at least "
+                       f"{1.0 - dt / (2.0 * seconds):.4f} for a horizon of 2x {seconds:.1f} s, "
+                       f"or shorten what the task requires.",
+                caught_before="E31: a 2 s hold discounted to 0.081. The policy learned to "
+                              "cycle up and down instead, because the pump paid sooner.",
+            ))
+    return out or [Finding(
+        Severity.OK, "discount horizon",
+        f"gamma {ppo.gamma} at {1/dt:.0f} Hz is {horizon_s:.2f} s, covering "
+        + (", ".join(f"{n} ({s:.1f} s)" for n, s in needs) if needs else "no stated requirement"))]
+
+
+@check
+def shaping_gamma_matches_rl_gamma(config) -> list[Finding]:
+    """Potential-based shaping is only policy-invariant when its gamma IS the RL gamma.
+
+    Ng, Harada & Russell (1999) prove that adding `F(s, s') = g*Phi(s') - Phi(s)` leaves the
+    optimal policy unchanged. The proof is that the DISCOUNTED sum telescopes:
+
+        sum_t g^t (g*Phi(s_{t+1}) - Phi(s_t))  =  -Phi(s_0) + lim g^T Phi(s_T)
+
+    which depends only on the start state. That telescoping requires the g in the shaping to
+    be the same g the agent discounts with. With a different one, say g_shape = 1:
+
+        sum_t g^t (Phi(s_{t+1}) - Phi(s_t))
+
+    does not telescope. Each rise is discounted less than the fall that undoes it, so a closed
+    up-and-down loop nets a PROFIT and the shaping becomes a reward pump.
+
+    E31, measured on the final policy over 9.6 s and 64 envs: the shaping paid out 613.8 and
+    clawed back -591.5. Undiscounted that nets 22.3, which is why the code comment claiming
+    "oscillating the pelvis up and down pays exactly zero" looked right. Discounted at the
+    gamma PPO actually maximises it nets 44.7, larger than its own undiscounted value and
+    larger than every other reward term combined: 58% of the whole signal, all of it earned by
+    cycling. The humanoid learned to jump to 1.28 m with zero ground contact and land on his
+    head, roughly four times per 10 seconds.
+
+    The reason the mismatch was introduced was real: at gamma 0.99 the standing drain
+    -(1-g)*Phi costs weight*0.01*Phi per step, which at weight 150 is about 1.0/step and
+    swamps every honest term. That argument is a reason to raise gamma or lower the weight,
+    not to break the proof. This check reports the drain so the trade is visible.
+    """
+    if getattr(config.run, "task", "") != "getup":
+        return []
+    g_rl = float(config.ppo.gamma)
+    g_shape = float(config.getup.shaping_gamma)
+    weight = float(config.getup.shaping_weight)
+    if abs(g_shape - g_rl) > 1e-9:
+        return [Finding(
+            Severity.CONTRADICTION, "shaping gamma",
+            f"shaping_gamma {g_shape} != ppo.gamma {g_rl}, so the potential shaping does not "
+            f"telescope in the discounted sum and an up-and-down cycle pays a profit.",
+            remedy=f"Set shaping_gamma to {g_rl}. The standing drain that argument was made "
+                   f"against is weight*(1-gamma)*Phi = {weight*(1-g_rl)*0.7:.3f}/step at "
+                   f"Phi=0.7 and weight {weight}; if that is too large, lower the weight "
+                   f"rather than the gamma.",
+            caught_before="E31: 58% of the reward signal was a pump earned by jumping to "
+                          "1.28 m with no ground contact and landing on his head.",
+        )]
+    return [Finding(
+        Severity.OK, "shaping gamma",
+        f"matches ppo.gamma at {g_rl}; standing drain "
+        f"{weight*(1-g_rl)*0.7:.3f}/step at Phi=0.7")]
 
 
 def run_all(config, checkpoint: Path | None = None) -> list[Finding]:

@@ -17,9 +17,17 @@ because the Phase 3 mocap retargeting tooling is written against that exact file
    first pulls the joint toward the target, the second damps oscillation.
 
    Crucially this is configured *inside MuJoCo*, using position actuators, rather than
-   computed in Python. MuJoCo then runs the PD at the full 200 Hz physics rate while the
-   policy sets targets at 50 Hz. Computing it in Python would force stepping physics one
+   computed in Python. MuJoCo then runs the PD at the full 500 Hz physics rate while the
+   policy sets targets at 125 Hz. Computing it in Python would force stepping physics one
    step at a time, which Phase 0 measured as 2.6x slower (see DESIGN.md section 2.2).
+
+   THOSE TWO NUMBERS READ "200 Hz" AND "50 Hz" UNTIL E31. They were wrong: the scene's
+   timestep is 0.002 s (500 Hz) and decimation is 4, giving a 125 Hz control rate. A comment
+   on the very function that loads the model asserted a rate 2.5x slower than the one the
+   code produces, and that wrong rate is the reason `gamma`, `max_episode_steps` and the
+   rollout `horizon` were all copied unchanged from 50 Hz reference repos. If you are
+   comparing any per-step or per-second constant against another project, read this line
+   twice: ONE CONTROL STEP IS 8 ms.
 
    MuJoCo actuator force is `gear * (gain * ctrl + bias)`. For a position servo,
    `gain = kp` and `bias = -kp*q - kv*qd`, giving `force = kp*(ctrl - q) - kv*qd` once gear

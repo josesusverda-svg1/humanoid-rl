@@ -90,6 +90,7 @@ class ThreadedVecEnv:
         action_scale_mode: str = "fraction",
         seed: int = 0,
         domain_rand: DomainRandConfig | None = None,
+        stagger_initial_episodes: bool = False,
     ) -> None:
         # Loads the MJCF, converts its torque motors into PD position servos, derives the
         # standing pose, and adds foot touch sensors. See envs/model_prep.py.
@@ -99,6 +100,7 @@ class ThreadedVecEnv:
         self.num_envs = int(num_envs)
         self.decimation = int(decimation)
         self.max_episode_steps = int(max_episode_steps)
+        self.stagger_initial_episodes = bool(stagger_initial_episodes)
         self.rng = np.random.default_rng(seed)
 
         hw = hardware.detect()
@@ -120,6 +122,14 @@ class ThreadedVecEnv:
         self.proprio_dim = (
             self.n_joint_pos + self.n_joint_vel + 3 + 3 + 3 + self.nu + self.n_feet
         )
+        # The task is configured BEFORE its observation width is read. A task whose width
+        # depends on data it loads during configuration (the get-up reference block, E43)
+        # would otherwise report its unconfigured width here and the extra channels would
+        # silently never exist, while observe_batch happily wrote into a too-narrow buffer.
+        if hasattr(task, "configure_for_model"):
+            task.configure_for_model(self.prepared.standing_height)
+        if hasattr(task, "configure_for_prepared"):
+            task.configure_for_prepared(self.prepared)
         self.obs_dim = self.proprio_dim + task.task_obs_dim
         self.n_reward_terms = max(1, len(task.reward_term_names))
 
@@ -200,13 +210,8 @@ class ThreadedVecEnv:
         )
         # Let the task derive height-dependent thresholds from the actual model rather
         # than carrying numbers that silently go stale when the humanoid is swapped.
-        if hasattr(task, "configure_for_model"):
-            task.configure_for_model(self.prepared.standing_height)
-        # Wider hook for tasks that need more than the standing height (torque ceilings, the
-        # actuator->qpos map, key body layout). Kept separate so the existing narrow
-        # signature, which several tasks implement, does not change.
-        if hasattr(task, "configure_for_prepared"):
-            task.configure_for_prepared(self.prepared)
+        # configure_for_model / configure_for_prepared already ran above, before obs_dim was
+        # computed; see the note there. Idempotent by construction, so they are not repeated.
         if hasattr(task, "set_joint_limits"):
             task.set_joint_limits(self._ctrl_lo.copy(), self._ctrl_hi.copy())
         # The limits above are per-ACTUATOR; the task reads joint angles out of qpos, and on
@@ -597,6 +602,20 @@ class ThreadedVecEnv:
         self.state.ctrl[:] = 0.0
         self._ctrl_filtered[:] = self._default_joint_pos
         self._do_resets(all_idx)
+        # E34: de-synchronise episode boundaries. With no early termination every env
+        # truncates at max_episode_steps on the SAME step, so anything tied to resets (the
+        # get-up task's standing starts) arrives in a burst once per ~104 iterations and the
+        # policy trains on pure-floor batches in between. Measured on the live run this was
+        # built to fix: reward/stand was exactly 0.0 in 332 of 349 iterations, and each
+        # burst spiked KL to 0.09-0.18 against a 0.01 target, slashing the learning rate.
+        # A random initial phase makes the first episode of each env shorter by a random
+        # amount; every later episode keeps that offset forever, so resets trickle at a
+        # steady ~num_envs/max_episode_steps per step instead of arriving as a wall.
+        # TRAINING ENVS ONLY (the flag stays False elsewhere): a staggered evaluation env
+        # would truncate its episodes early and bias every episode-return metric.
+        if self.stagger_initial_episodes:
+            self.state.episode_step[:] = self.rng.integers(
+                0, self.max_episode_steps, self.num_envs)
         return self._obs.copy()
 
     def step(self, actions: np.ndarray) -> StepResult:

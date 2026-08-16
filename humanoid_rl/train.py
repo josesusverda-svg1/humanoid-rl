@@ -80,6 +80,7 @@ class Trainer:
             action_scale_mode=config.env.action_scale_mode,
             seed=seed,
             domain_rand=config.domain_rand,
+            stagger_initial_episodes=config.env.stagger_initial_episodes,
         )
 
         self.policy = ActorCritic(
