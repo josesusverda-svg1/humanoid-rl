@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from humanoid_rl.config import Config  # noqa: E402
 from humanoid_rl.envs.vec_env import ThreadedVecEnv  # noqa: E402
-from search_getup_trajectory import HOLD_SECONDS, SEG_SECONDS, SearchTask  # noqa: E402
+from search_getup_trajectory import SearchTask  # noqa: E402
 
 
 def clauses(task, state, g) -> dict[str, np.ndarray]:
@@ -65,18 +65,25 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    params = np.load(args.params or REPO_ROOT / f"data/fallen/getup_params_{args.family}.npy")
+    d = np.load(args.params or REPO_ROOT / f"data/fallen/getup_params_{args.family}.npz")
+    params = d["params"]
+    # Timing comes from the FILE, never from the current value of the search module's
+    # constants. Replaying a searched trajectory under different segment lengths is not a
+    # replay: the same waypoints stretched from a 3.75 s ramp to a 5.5 s one put the pelvis
+    # at 0.085 where the search recorded 0.875.
+    seg_seconds = float(d["seg_seconds"])
+    hold_seconds = float(d["hold_seconds"])
     cfg = Config.load(REPO_ROOT / "configs" / "getup.yaml")
     g = cfg.getup
-    bank = np.load(REPO_ROOT / g.bank_path, allow_pickle=False)
-    rng = np.random.default_rng(args.seed)
-    pool = np.flatnonzero(bank["label"] == args.family)
 
     task = SearchTask(replace(g, ref_path="", ball_enabled=False, standing_reset_frac=0.0,
                               midrise_reset_frac=0.0, rising_reset_frac=0.0,
                               track_reset_frac=0.0))
-    # The same draw the search made: same seed, same first call on the generator.
-    task.start_q = bank["qpos"][pool[rng.integers(0, pool.size)]]
+    # The start pose the search actually used, stored in the same file. Re-drawing it from
+    # the seed would only work for the FIRST family: every later draw sits behind however many
+    # normal deviates the search consumed, so a shared seed reproduces the sequence and not
+    # any one element of it.
+    task.start_q = d["start_q"]
     env = ThreadedVecEnv(
         REPO_ROOT / cfg.env.model_path, task, num_envs=1, num_workers=1,
         decimation=cfg.env.decimation, max_episode_steps=1_000_000,
@@ -85,8 +92,8 @@ def main() -> int:
         action_scale_mode=cfg.env.action_scale_mode)
     task._exam_level = len(g.exam_levels) - 1                       # noqa: SLF001
 
-    seg = max(1, int(round(SEG_SECONDS / env.dt)))
-    hold = max(1, int(round(HOLD_SECONDS / env.dt)))
+    seg = max(1, int(round(seg_seconds / env.dt)))
+    hold = max(1, int(round(hold_seconds / env.dt)))
     total = params.shape[0] * seg + hold
     model = env.prepared.model
     data = mujoco.MjData(model)
@@ -95,7 +102,7 @@ def main() -> int:
     env.reset()
     acc: dict[str, float] = {}
     n_hold = 0
-    trace, imgs = [], []
+    trace, speeds, imgs = [], [], []
     cur = np.zeros((1, env.nu), dtype=np.float32)
     with mujoco.Renderer(model, height=420, width=340) as renderer:
         for step in range(total):
@@ -111,6 +118,7 @@ def main() -> int:
             env.step(np.clip(a, -1.0, 1.0))
             s = env.state
             trace.append(float(s.root_height[0]))
+            speeds.append(float(np.linalg.norm(s.qvel[0, 0:3])))
             if not in_ramp:
                 for k, v in clauses(task, s, g).items():
                     acc[k] = acc.get(k, 0.0) + float(v[0])
@@ -127,10 +135,18 @@ def main() -> int:
                              renderer.render().copy()))
     env.close()
 
-    print(f"{args.family}: {params.shape[0]} waypoints, ramp {params.shape[0] * SEG_SECONDS:.2f} s, "
-          f"hold {HOLD_SECONDS:.2f} s at the nominal stand")
+    print(f"{args.family}: {params.shape[0]} waypoints, ramp "
+          f"{params.shape[0] * seg_seconds:.2f} s, hold {hold_seconds:.2f} s "
+          f"at the nominal stand (timings read from the file)")
+    ramp = params.shape[0] * seg
     print(f"pelvis: start {trace[0]:.3f}  peak {max(trace):.3f}  "
           f"end {trace[-1]:.3f}  (standing height {task._standing_height:.3f})")  # noqa: SLF001
+    # How FAST it got up. A kip-up and a get-up end in the same pose and are told apart only
+    # here: the first complete search won every starting orientation with a rise that moved
+    # the pelvis 0.65 m in 0.6 s and then failed the "not ballistic" conjunct for a third of
+    # the hold.
+    print(f"root speed: peak during the rise {max(speeds[:ramp]):.2f} m/s, "
+          f"peak during the hold {max(speeds[ramp:]):.2f} m/s")
     print("\nstanding conjuncts over the hold, worst first:")
     for k, v in sorted(acc.items(), key=lambda x: x[1]):
         share = v / max(n_hold, 1)

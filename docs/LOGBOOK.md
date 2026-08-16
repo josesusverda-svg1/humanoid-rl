@@ -96,6 +96,71 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
 
 Newest first. `E##  date  what changed`.
 
+### E48  2026-08-16  The body CAN stand up. It just does it like a gymnast.
+
+**The first complete search answered the question this project could not answer in sixteen
+training runs: yes, this body can get off the floor.** All four starting orientations, cold
+start, no reference, no reward tuning.
+
+| start | final pelvis | standing predicate, over the hold |
+|---|---|---|
+| supine | 0.875 | 65% |
+| prone | 0.875 | 74% |
+| side_left | **0.877** | 79% |
+| side_right | 0.874 | 68% |
+
+Standing height is 0.877. Sixteen training runs never passed 0.417 from the floor.
+
+**All four were REJECTED by the 90% acceptance bar, and the script then printed "NO FEASIBLE
+GET-UP FOUND", which contradicted its own data.** That sentence was written for the case where
+nothing leaves the floor, and it fired on the case where everything reached standing height.
+Fixed: the two outcomes now print different conclusions, because "the body cannot" and "my bar
+is strict" are findings about completely different things and confusing them is how this
+project has repeatedly talked itself out of results it already had.
+
+**What the frames showed, which no metric did.** The rise, supine:
+
+| t | pelvis |
+|---|---|
+| 3.3 s | 0.21, still on the floor |
+| 3.9 s | 0.86, standing |
+
+0.65 m in 0.6 s. That is a KIP-UP, not a get-up. The per-conjunct table agrees precisely:
+"13 not ballistic" held 66% where every other clause held 80-100%, so the residual whip is
+exactly what fails the predicate. The flight penalty never fired, because a kip-up keeps one
+foot planted; what makes it inhuman is the rate, not the airtime.
+
+**Confirmed by accident, and worth keeping.** Replaying the same waypoints stretched from a
+3.75 s ramp to 5.5 s left the body flat at pelvis 0.085 instead of standing at 0.875. The
+solution was purely ballistic: remove the speed and nothing remains. That accident also
+exposed an instrument bug (the replay read timings from the current source rather than from
+the search that produced the parameters), now fixed by storing timings, start pose and
+penalty settings inside the parameter file.
+
+**E48 change, four things, one intent: price the RATE.**
+1. `rush`: root linear speed above 0.6 m/s, plus angular above 1.8 rad/s at 0.15 weight,
+   accumulated over the WHOLE trajectory, weight 1.5. The only term that prices "how fast".
+2. Segment length 0.75 s -> 1.1 s. A short rise window makes the explosive solution cheapest.
+3. Hold 1.5 s -> 2.5 s, so a residual whip cannot run out the clock.
+4. Start pose and timing saved with the parameters, so a replay is a replay.
+
+**Pre-registered predictions:**
+1. **PRIMARY: at least one family reaches standing predicate >= 90% of the hold**, i.e. an
+   accepted clip. The rise is now allowed 5.5 s, which is longer than a person takes.
+2. Peak root speed during the rise falls below 1.0 m/s in the winners. (The kip-up's own
+   number is unavailable: the constants changed before it was measured, and reverting them to
+   recover a number I already know the sign of is not worth the wall-clock. Stated as a gap
+   rather than quietly dropped.)
+3. **Risk, stated up front**: the speed penalty may make standing unreachable and all four
+   families plateau below pelvis 0.5. If that happens the response is `--w-rush 0.5`, NOT
+   lowering `--min-stand-frac`. Weakening the acceptance bar to fit the result is the move
+   this project has regretted every time.
+4. **Failure mode to watch**: a slow rise followed by a slow topple. It satisfies the speed
+   budget honestly and fails the predicate anyway. Diagnosed by clause 1 or 7 leading the
+   blocker table instead of clause 13.
+5. Nothing is trained against any clip until it has been replayed frame by frame under its own
+   saved timings and looked at by a person (E47's standing instruction).
+
 ### E47  2026-08-16  The reference was unexecutable. Stop authoring, start searching.
 
 **E42-E46 VERDICT: INVALID at the source.** All four runs imitated a reference film that no

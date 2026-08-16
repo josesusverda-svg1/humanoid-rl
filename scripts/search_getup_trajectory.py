@@ -42,8 +42,14 @@ from humanoid_rl.tasks.getup import GetUpTask  # noqa: E402
 #: Seconds per waypoint segment, and the hold at the end. The hold commands the nominal
 #: stand (action zero) and is what separates "stood up" from "threw itself upward": the body
 #: has to still be up when the choreography stops.
-SEG_SECONDS = 0.75
-HOLD_SECONDS = 1.5
+#:
+#: Both were lengthened after the first complete search. At 0.75 s x 5 + 1.5 s the winner in
+#: every one of the four starting orientations was a KIP-UP: the pelvis went 0.21 -> 0.86 in
+#: 0.6 s, and the conjunct it failed was "not ballistic", 66% where everything else was 80-100%.
+#: A short rise window makes the explosive solution the cheap one, and a short hold lets the
+#: residual whip run out the clock instead of being caught.
+SEG_SECONDS = 1.1
+HOLD_SECONDS = 2.5
 #: Acceptance is NOT a height. It is the task's own 13-conjunct standing predicate, held for
 #: --min-stand-frac of the hold. Height thresholds have been gamed here by a headstand and by
 #: knees locked backwards; the predicate is the instrument that rejected both.
@@ -73,7 +79,7 @@ class SearchTask(GetUpTask):
 
 
 def rollout(env: ThreadedVecEnv, targets: np.ndarray, seg_steps: int, hold_steps: int,
-            record: bool = False):
+            record: bool = False, speed_ok: float = 0.6, w_rush: float = 1.5):
     """Run one batch of candidates. `targets` is (N, waypoints, nu) in action units.
 
     Servo targets ramp linearly from the previous waypoint to the next, then the hold
@@ -88,6 +94,7 @@ def rollout(env: ThreadedVecEnv, targets: np.ndarray, seg_steps: int, hold_steps
     hold_min = np.full(n, np.inf)
     stand_sum = np.zeros(n)
     flight = np.zeros(n)
+    rush = np.zeros(n)
     foot_h = env.task.cfg.u_foot_height
 
     def advance(a: np.ndarray, in_hold: bool) -> None:
@@ -99,6 +106,14 @@ def rollout(env: ThreadedVecEnv, targets: np.ndarray, seg_steps: int, hold_steps
         # jumping: measured live, a candidate peaking at 1.017 (above the 0.877 standing
         # height, so airborne) outscored one that reached 0.874 and stayed there.
         flight[:] += (s.key_body_pos[:, 0:2, 2].min(axis=1) > foot_h)
+        # Speed above a walking-pace budget, accumulated over the WHOLE trajectory. The
+        # flight penalty alone does not reach a kip-up, because a kip-up keeps one foot
+        # planted and so never registers a flight frame; what makes it inhuman is the rate,
+        # not the airtime. This is the only term that prices "how fast", and it is what
+        # separates a person standing up from a gymnast snapping upright.
+        rush[:] += np.maximum(np.linalg.norm(s.qvel[:, 0:3], axis=1) - speed_ok, 0.0)
+        rush[:] += 0.15 * np.maximum(np.linalg.norm(s.qvel[:, 3:6], axis=1) - 3.0 * speed_ok,
+                                     0.0)
         if in_hold:
             hold_sum[:] += s.root_height
             np.minimum(hold_min, s.root_height, out=hold_min)
@@ -131,7 +146,8 @@ def rollout(env: ThreadedVecEnv, targets: np.ndarray, seg_steps: int, hold_steps
     #   * flight time is subtracted outright.
     capped_peak = np.minimum(peak, env.prepared.standing_height)
     score = (4.0 * stand_frac + 2.0 * hold_min + 0.5 * (hold_sum / hold_steps)
-             + 0.3 * capped_peak - 2.0 * (flight / total_steps))
+             + 0.3 * capped_peak - 2.0 * (flight / total_steps)
+             - w_rush * (rush / total_steps))
     if record:
         return (score, final, peak, stand_frac,
                 np.stack(frames_q, 1), np.stack(frames_v, 1))
@@ -147,6 +163,10 @@ def main() -> int:
     ap.add_argument("--explore", type=float, default=0.35,
                     help="injected sampling noise, decayed to zero over the run")
     ap.add_argument("--sigma-floor", type=float, default=0.08)
+    ap.add_argument("--speed-ok", type=float, default=0.6,
+                    help="root speed budget in m/s; anything above it is penalised")
+    ap.add_argument("--w-rush", type=float, default=1.5,
+                    help="weight on the speed-above-budget penalty")
     ap.add_argument("--patience", type=int, default=8,
                     help="iterations without improvement before reseating on the champion")
     ap.add_argument("--warm-start", action="store_true",
@@ -182,18 +202,19 @@ def main() -> int:
           f"pop {args.pop}, exam level {task._exam_level}", flush=True)  # noqa: SLF001
 
     clips_q, clips_v, bounds = [], [], []
+    best_by_family: dict[str, tuple[float, float]] = {}
     for family in args.families.split(","):
         pool = np.flatnonzero(lab == family)
         if pool.size == 0:
             print(f"  {family}: no poses in the bank, skipped")
             continue
         task.start_q = bank["qpos"][pool[rng.integers(0, pool.size)]]
-        param_path = REPO_ROOT / f"data/fallen/getup_params_{family}.npy"
+        param_path = REPO_ROOT / f"data/fallen/getup_params_{family}.npz"
         # Warm start from a previous search when its shape matches. CEM converges its own
         # sigma to nothing, so continuing a search means reopening it, not restarting it.
         mu = np.zeros((args.waypoints, env.nu))
         if args.warm_start and param_path.exists():
-            prev = np.load(param_path)
+            prev = np.load(param_path)["params"]
             if prev.shape == mu.shape:
                 mu = prev
                 print(f"  {family}: warm start from {param_path.name}")
@@ -220,7 +241,9 @@ def main() -> int:
                 -1.0, 1.0)
             cand[0] = mu                      # always evaluate the mean itself
             cand[1] = best_params             # and never lose the incumbent
-            score, final, peak, stand, _, _ = rollout(env, cand, seg_steps, hold_steps)
+            score, final, peak, stand, _, _ = rollout(
+                env, cand, seg_steps, hold_steps,
+                speed_ok=args.speed_ok, w_rush=args.w_rush)
             order = np.argsort(-score)[:k]
             elite = cand[order]
             mu = (w * elite).sum(0)
@@ -250,15 +273,24 @@ def main() -> int:
                   f"  elite {float(final[order].mean()):.3f}"
                   f"  peak {float(peak.max()):.3f}  spread {spread.mean():.2f}", flush=True)
 
-        # Keep the parameters whatever the verdict. A rejected 0.72 is the starting point of
-        # the next search, and the first run threw one away.
-        np.save(param_path, best_params)
+        # Keep the parameters whatever the verdict, and keep everything needed to replay
+        # them EXACTLY. A trajectory of servo targets is meaningless without the start pose
+        # and the timing it was searched under: replaying these same waypoints stretched from
+        # a 3.75 s ramp to a 5.5 s one left the body flat on the floor at pelvis 0.085 instead
+        # of standing at 0.875, because the solution was ballistic and depended on the rate.
+        # A file that silently borrows the caller's current constants is the same class of
+        # instrument error this project has paid for four times.
+        np.savez(param_path, params=best_params, start_q=task.start_q,
+                 seg_seconds=SEG_SECONDS, hold_seconds=HOLD_SECONDS,
+                 speed_ok=args.speed_ok, w_rush=args.w_rush)
         # Replay the best candidate to record it. Deterministic: fixed start, no domain
         # randomisation, no pushes, so this reproduces the scoring rollout exactly.
         replay = np.tile(best_params[None], (args.pop, 1, 1))
         _s, final, peak, stand, fq, fv = rollout(
-            env, replay, seg_steps, hold_steps, record=True)
+            env, replay, seg_steps, hold_steps, record=True,
+            speed_ok=args.speed_ok, w_rush=args.w_rush)
         z, sf = float(final[0]), float(stand[0])
+        best_by_family[family] = (z, sf)
         keep = sf >= args.min_stand_frac
         print(f"  {family:<10} SOLUTION pelvis {z:.3f}, peak {float(peak[0]):.3f}, "
               f"standing {sf * 100:.0f}% of the hold  {'KEPT' if keep else 'REJECTED'}")
@@ -268,11 +300,28 @@ def main() -> int:
     env.close()
 
     if not clips_q:
-        print("\nNO FEASIBLE GET-UP FOUND. Read that literally: under these servos and this "
-              "action range, a direct search over open-loop servo trajectories did not stand "
-              "this body up from lying. A closed-loop policy may still succeed where an "
-              "open-loop schedule cannot, but no reference clip can be handed to it, and any "
-              "reward that assumes one is assuming something unproven.")
+        # Two very different outcomes used to print the same sentence, and the canned one
+        # ("no feasible get-up") contradicted the script's own data the first time every
+        # family rose to standing height and was rejected on strictness. Separate them: a
+        # body that never leaves the floor is a finding about the BODY, a body that stands
+        # and misses the bar is a finding about the ACCEPTANCE CRITERION, and reporting the
+        # second as the first is how a project talks itself out of a result it already has.
+        if best_by_family and max(z for z, _s in best_by_family.values()) >= 0.75:
+            print("\nNO CLIP ACCEPTED, but this is NOT 'the body cannot stand up'. Rises "
+                  "reaching standing height were found:")
+            for fam, (z, sf) in best_by_family.items():
+                print(f"    {fam:<11} pelvis {z:.3f}, standing {sf * 100:.0f}% of the hold")
+            print(f"  The bar is the standing predicate for >= {args.min_stand_frac * 100:.0f}% "
+                  f"of the hold, and it is a CHOICE, not physics. Before lowering it, run "
+                  f"scripts/replay_getup_params.py to see WHICH conjunct is short: a rise "
+                  f"blocked on 'not ballistic' is an explosive kip-up that should be "
+                  f"penalised, not admitted.")
+        else:
+            print("\nNO FEASIBLE GET-UP FOUND, and nothing came close: under these servos and "
+                  "this action range a direct search over open-loop servo trajectories did "
+                  "not lift this body off the floor. A closed-loop policy may still succeed "
+                  "where an open-loop schedule cannot, but no reference clip can be handed to "
+                  "it, and any reward that assumes one is assuming something unproven.")
         return 1
 
     off = 0
