@@ -403,6 +403,200 @@ def get_skeleton(run_id: str, name: str) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
+# ----------------------------------------------------------------- getup mission control
+
+
+GETUP_KEYS = [
+    "iteration", "reward/track", "reward/stand", "reward/hold", "reward/latch",
+    "reward/lift", "reward/launch", "action_std", "approx_kl", "lr",
+    "eval/standing_frac", "eval/standing_frac_strict", "eval/held_ever_frac",
+    "eval/exam_level", "eval/root_height", "eval/head_height_ratio",
+    "eval/gate_frac", "eval/launch_overspeed_frac", "eval/episode_return",
+    "eval/foot_load_bw", "eval/knee_max",
+]
+
+
+@app.get("/api/runs/{run_id}/getup")
+def get_getup(run_id: str, max_points: int = Query(600, ge=50, le=4000)) -> dict[str, Any]:
+    """Everything the get-up console plots, in one call.
+
+    Train-side rows and eval rows are interleaved in metrics.jsonl; the console wants both,
+    plus a windowed latch RATE (the raw latch column is a spike train that reads as noise
+    when plotted directly: what matters is how often holds complete, not the batch-mean of
+    a once-per-episode bonus).
+    """
+    run_dir = _safe_run_dir(run_id)
+    path = run_dir / "metrics.jsonl"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="metrics.jsonl not found")
+    train_rows: list[dict[str, Any]] = []
+    eval_rows: list[dict[str, Any]] = []
+    latch_window: list[int] = []
+    # NOT an if/elif chain on the two key families: the trainer writes evaluation results
+    # INTO the same row as that iteration's training metrics, so an elif on "reward/latch"
+    # swallowed every eval row and the console's evaluation panels were silently empty.
+    # Each row is classified independently, and a row can be both.
+    for r in _read_jsonl(path):
+        if "reward/latch" in r:
+            latch_window.append(1 if (r.get("reward/latch") or 0) > 0 else 0)
+            if len(latch_window) > 100:
+                latch_window.pop(0)
+            row = {k: r.get(k) for k in GETUP_KEYS if k in r}
+            row["latch_rate_100"] = sum(latch_window) / max(len(latch_window), 1)
+            train_rows.append(row)
+        if "eval/episode_return" in r:
+            eval_rows.append({k: r.get(k) for k in GETUP_KEYS if k in r})
+    return {
+        "train": _downsample(train_rows, max_points),
+        "eval": eval_rows[-max_points:],
+        "total_train_rows": len(train_rows),
+    }
+
+
+@app.get("/api/inspection")
+def get_inspection() -> dict[str, Any]:
+    """The latest visual-inspection artefacts the watch loop produces.
+
+    The 13-conjunct breakdown and per-frame telemetry only exist in the watch script's
+    stdout; the loop stores its last capture at /tmp/w.txt and its frame strip at
+    /tmp/getup_watch.png. Parsing that capture here means the dashboard shows exactly what
+    the last human-grade inspection saw, with its age, rather than pretending to a live
+    feed it does not have.
+    """
+    out: dict[str, Any] = {"conjuncts": [], "frames": [], "age_seconds": None,
+                           "has_strip": False, "has_reference": False}
+    cap = Path("/tmp/w.txt")
+    if cap.exists():
+        import re
+        import time
+        out["age_seconds"] = round(time.time() - cap.stat().st_mtime)
+        section = None
+        for line in cap.read_text(errors="ignore").splitlines():
+            if "standing conjuncts" in line:
+                section = "conjuncts"
+                continue
+            if "rendering frames" in line:
+                section = "frames"
+                continue
+            if section == "conjuncts":
+                m = re.match(r"\s+(\d+)\s+(.+?)\s+([\d.]+)%", line)
+                if m:
+                    out["conjuncts"].append({
+                        "index": int(m.group(1)),
+                        "name": m.group(2).strip(),
+                        "frac": float(m.group(3)) / 100.0,
+                    })
+            elif section == "frames":
+                m = re.match(r"\s*([\d.]+)s\s+([\d.-]+)\s+([\d.-]+)\s+([\d.-]+)"
+                             r"\s+([\d.-]+)\s+([\d.-]+)", line)
+                if m:
+                    out["frames"].append({
+                        "t": float(m.group(1)), "pelvis": float(m.group(2)),
+                        "head": float(m.group(3)), "feet_bw": float(m.group(4)),
+                        "knee": float(m.group(5)), "hands": float(m.group(6)),
+                    })
+    out["has_strip"] = Path("/tmp/getup_watch.png").exists()
+    out["has_reference"] = Path("/tmp/getup_reference.png").exists()
+    return out
+
+
+@app.get("/api/inspection/strip")
+def get_inspection_strip() -> FileResponse:
+    p = Path("/tmp/getup_watch.png")
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="no frame strip yet")
+    return FileResponse(p, media_type="image/png")
+
+
+@app.get("/api/inspection/reference")
+def get_inspection_reference() -> FileResponse:
+    p = Path("/tmp/getup_reference.png")
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="no reference strip")
+    return FileResponse(p, media_type="image/png")
+
+
+@app.get("/api/logbook")
+def get_logbook() -> list[dict[str, Any]]:
+    """docs/LOGBOOK.md parsed into experiment cards, newest first.
+
+    The logbook is the lab's institutional memory; surfacing it beside the live run is what
+    separates a console from a metrics page. Verdicts are extracted by convention (the
+    logbook's own rule: every entry carries one of five verdicts).
+    """
+    import re
+    path = REPO_ROOT / "docs" / "LOGBOOK.md"
+    if not path.exists():
+        return []
+    text = path.read_text(errors="ignore")
+    entries = []
+    blocks = re.split(r"^### ", text, flags=re.M)[1:]
+    for b in blocks:
+        lines = b.splitlines()
+        title = lines[0].strip()
+        body = "\n".join(lines[1:])
+        verdict = None
+        m = re.search(r"\b(WORKED|NO EFFECT|WORSE|INVALID|MIXED|RETRACTED|"
+                      r"PRE-REGISTERED|TRIGGERED|NnO EFFECT)\b", title + " " + body[:800])
+        if m:
+            verdict = m.group(1)
+        num = re.match(r"E(\d+)", title)
+        entries.append({
+            "title": title,
+            "verdict": verdict,
+            "excerpt": body[:1600],
+            "_num": int(num.group(1)) if num else -1,
+        })
+    entries.sort(key=lambda e: e["_num"], reverse=True)
+    for e in entries:
+        e.pop("_num")
+    return entries
+
+
+_COMPARE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+@app.get("/api/getup/compare")
+def get_compare() -> list[dict[str, Any]]:
+    """One headline row per get-up run, for the cross-run table. Cached by file mtime."""
+    out = []
+    for d in sorted(RUNS_DIR.glob("getup-*")):
+        path = d / "metrics.jsonl"
+        if not path.exists():
+            continue
+        mtime = path.stat().st_mtime
+        cached = _COMPARE_CACHE.get(d.name)
+        if cached and cached[0] == mtime:
+            out.append(cached[1])
+            continue
+        iters = 0
+        latch_count = 0
+        max_strict = 0.0
+        max_stand = 0.0
+        last_level = 0.0
+        last_iter = 0
+        for r in _read_jsonl(path):
+            if "reward/latch" in r:
+                iters += 1
+                if (r.get("reward/latch") or 0) > 0:
+                    latch_count += 1
+            if "eval/episode_return" in r:
+                max_strict = max(max_strict, r.get("eval/standing_frac_strict") or 0)
+                max_stand = max(max_stand, r.get("eval/standing_frac") or 0)
+                last_level = r.get("eval/exam_level") or last_level
+                last_iter = int(r.get("iteration") or last_iter)
+        row = {
+            "id": d.name, "iterations": iters, "latch_iters": latch_count,
+            "latch_share": round(latch_count / iters, 4) if iters else 0.0,
+            "max_standing_frac": max_stand, "max_strict_frac": max_strict,
+            "final_exam_level": last_level, "modified": mtime,
+        }
+        _COMPARE_CACHE[d.name] = (mtime, row)
+        out.append(row)
+    out.sort(key=lambda r: r["modified"], reverse=True)
+    return out
+
+
 @app.get("/api/runs/{run_id}/videos")
 def list_videos(run_id: str) -> list[dict[str, Any]]:
     """Videos rendered during evaluation, newest first, with their metadata sidecars.

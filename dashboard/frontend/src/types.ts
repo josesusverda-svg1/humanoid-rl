@@ -82,3 +82,80 @@ export interface VideoEntry {
   terrain_level?: number
   waypoints_completed?: number
 }
+
+// ---------------------------------------------------------------- getup mission control
+
+export interface GetupTrainRow {
+  iteration: number
+  'reward/track'?: number
+  'reward/stand'?: number
+  'reward/hold'?: number
+  'reward/latch'?: number
+  'reward/lift'?: number
+  'reward/launch'?: number
+  latch_rate_100?: number
+  action_std?: number
+  approx_kl?: number
+  lr?: number
+}
+
+export interface GetupEvalRow {
+  iteration: number
+  'eval/standing_frac'?: number
+  'eval/standing_frac_strict'?: number
+  'eval/held_ever_frac'?: number
+  'eval/exam_level'?: number
+  'eval/root_height'?: number
+  'eval/head_height_ratio'?: number
+  'eval/gate_frac'?: number
+  'eval/launch_overspeed_frac'?: number
+  'eval/episode_return'?: number
+  'eval/foot_load_bw'?: number
+  'eval/knee_max'?: number
+}
+
+export interface GetupSeries {
+  train: GetupTrainRow[]
+  eval: GetupEvalRow[]
+  total_train_rows: number
+}
+
+export interface ConjunctRow {
+  index: number
+  name: string
+  frac: number
+}
+
+export interface InspectionFrame {
+  t: number
+  pelvis: number
+  head: number
+  feet_bw: number
+  knee: number
+  hands: number
+}
+
+export interface Inspection {
+  conjuncts: ConjunctRow[]
+  frames: InspectionFrame[]
+  age_seconds: number | null
+  has_strip: boolean
+  has_reference: boolean
+}
+
+export interface LogbookEntry {
+  title: string
+  verdict: string | null
+  excerpt: string
+}
+
+export interface CompareRow {
+  id: string
+  iterations: number
+  latch_iters: number
+  latch_share: number
+  max_standing_frac: number
+  max_strict_frac: number
+  final_exam_level: number
+  modified: number
+}
