@@ -152,14 +152,28 @@ class PreparedModel:
     #: termination so it transfers to a differently proportioned humanoid.
     standing_head_height: float = 0.0
     joint_names: list[str] = field(default_factory=list)
+    #: Terrain height reader, or None on flat ground. Built from the COMPILED model, which is
+    #: the only source of truth: the compiler renormalises heightfield data to [0, 1], so a
+    #: reader built from the authored array is wrong by a constant offset, silently.
+    terrain: object | None = None
 
     @property
     def nu(self) -> int:
         return self.model.nu
 
 
+def build_spec_with_foot_sensors(model_path: str | Path, margin: float = 0.01):
+    """The spec half of `build_model_with_foot_sensors`, before compiling.
+
+    Split out so terrain can be injected into the same spec rather than into a second,
+    differently-built one. Terrain that arrives through a different code path than the
+    sensors is terrain whose scene is not the scene being trained on.
+    """
+    return _spec_with_foot_sensors(model_path, margin)
+
+
 def build_model_with_foot_sensors(
-    model_path: str | Path, margin: float = 0.01
+    model_path: str | Path, margin: float = 0.01, spec=None
 ) -> tuple[mujoco.MjModel, list[str]]:
     """Compile the scene, adding a touch sensor under each foot.
 
@@ -180,6 +194,12 @@ def build_model_with_foot_sensors(
     Sensors are added through MjSpec rather than by editing the XML, so the upstream body
     file stays byte-identical and the Phase 3 mocap tooling keeps working.
     """
+    spec = _spec_with_foot_sensors(model_path, margin) if spec is None else spec
+    foot_names = sorted(b.name for b in spec.bodies if re.search(r"foot", b.name or ""))
+    return spec.compile(), foot_names
+
+
+def _spec_with_foot_sensors(model_path: str | Path, margin: float = 0.01):
     spec = mujoco.MjSpec.from_file(str(model_path))
     foot_names = sorted(b.name for b in spec.bodies if re.search(r"foot", b.name or ""))
     if not foot_names:
@@ -244,7 +264,7 @@ def build_model_with_foot_sensors(
         s.objtype = mujoco.mjtObj.mjOBJ_BODY
         s.objname = HEAD_BODY
 
-    return spec.compile(), foot_names
+    return spec
 
 
 def _gains_for(
@@ -418,6 +438,7 @@ def prepare(
     action_scale_fraction: float = 0.6,
     action_scale_mode: str = "fraction",
     gain_scale: float | None = None,
+    terrain: "TerrainConfig | None" = None,
 ) -> PreparedModel:
     """Load an MJCF and return it configured for position-controlled RL.
 
@@ -434,7 +455,29 @@ def prepare(
             across this body: 0.5 rad is a gentle nudge for a shoulder and the entire
             travel of an ankle.
     """
-    model, foot_names = build_model_with_foot_sensors(model_path)
+    # Terrain rides the SAME spec the foot sensors are added to, so there is exactly one
+    # scene. The two-pass bake puts the surface at the origin on z = 0, which is what lets
+    # `_compute_standing_height` and `_verify_pd_holds_pose` below run on genuinely flat
+    # ground and come out bit-identical to a plane run.
+    terrain_field = None
+    if terrain is not None and terrain.enabled:
+        from humanoid_rl.terrain import bake as _bake
+
+        from humanoid_rl.terrain import TerrainField as _TerrainField
+
+        spec, _grid = _bake(model_path, terrain,
+                            lambda p: build_spec_with_foot_sensors(p))
+        model, foot_names = build_model_with_foot_sensors(model_path, spec=spec)
+        _fid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        terrain_field = _TerrainField(model, _fid,
+                                      spawn_half_extent=terrain.spawn_half_extent)
+        # The anchor assertion. If this drifts, every height reward and the fall termination
+        # are measured against a surface that is not where the physics puts it.
+        h00 = float(terrain_field.height_at(np.zeros(1), np.zeros(1))[0])
+        if abs(h00) > 1e-9:
+            raise RuntimeError(f"terrain surface at the origin is {h00:.12f}, expected 0")
+    else:
+        model, foot_names = build_model_with_foot_sensors(model_path)
     to_position_control(model, gains, gain_scale)
 
     pose = DEFAULT_POSE if pose is None else pose
@@ -486,11 +529,29 @@ def prepare(
     default_qpos[2] = standing_height + 0.002
 
     tracking_error, sag = _verify_pd_holds_pose(model, default_qpos)
-    if tracking_error > 0.09 or sag > 0.03:
+    # abs(sag), not sag. The check was one-sided and therefore blind in exactly the direction
+    # that terrain introduces: a humanoid spawned INSIDE the ground is ejected upward, which
+    # produces NEGATIVE sag, and `sag > 0.03` reported PASS. Measured while building Phase 4:
+    # sag = -0.1047 m with 13 active contacts and `prepare()` returning normally. Every
+    # terrain design was relying on this guard to catch a bad anchor, and it could not.
+    if tracking_error > 0.09 or abs(sag) > 0.03:
         raise RuntimeError(
             f"PD gains are too soft: joints sag {np.degrees(tracking_error):.1f} deg and the "
-            f"root sinks {sag * 100:.1f} cm while merely holding the nominal pose. "
+            f"root moves {sag * 100:.1f} cm while merely holding the nominal pose "
+            f"({'sinking' if sag > 0 else 'being EJECTED, i.e. it started inside the ground'}). "
             "Raise GAIN_SCALE or add an entry to GAIN_OVERRIDES."
+        )
+    # The nominal pose must not be in contact at all. `sag` alone cannot see a pose that is
+    # interpenetrating but happens to balance, and on terrain that is the common case.
+    probe = mujoco.MjData(model)
+    mujoco.mj_resetData(model, probe)
+    probe.qpos[:] = default_qpos
+    mujoco.mj_forward(model, probe)
+    if probe.ncon > 0:
+        raise RuntimeError(
+            f"the nominal pose starts in contact ({probe.ncon} contacts) at root height "
+            f"{default_qpos[2]:.4f}. On flat ground this means the standing-height probe is "
+            "wrong; on terrain it means the spawn anchor was not lifted to the surface."
         )
 
     foot_bodies = _body_ids_matching(model, r"foot")
@@ -501,6 +562,17 @@ def prepare(
         dtype=np.int32,
     )
     floor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+    # -1 here is silent and expensive: it flows into `floor_geom_id`, and friction domain
+    # randomisation writes `geom_friction[floor_geom_id]`, so a missing floor would randomise
+    # the friction of the LAST geom in the model instead of the ground, forever, invisibly.
+    if floor_id < 0:
+        raise ValueError(
+            "no geom named 'floor'. It is required: the standing-height probe excludes it, "
+            "friction randomisation writes it, and terrain injection converts it."
+        )
+    if terrain_field is not None and int(model.geom_type[floor_id]) != int(
+            mujoco.mjtGeom.mjGEOM_HFIELD):
+        raise ValueError("terrain is enabled but the floor geom did not become a heightfield")
 
     # Every body except the feet and the world. Ground contact on any of these is a fall,
     # which is a far more reliable termination signal than a root height threshold alone
@@ -563,4 +635,5 @@ def prepare(
         key_body_names=key_names,
         standing_head_height=standing_head,
         joint_names=joint_names,
+        terrain=terrain_field,
     )

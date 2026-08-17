@@ -987,6 +987,140 @@ def shaping_gamma_matches_rl_gamma(config) -> list[Finding]:
         f"{weight*(1-g_rl)*0.7:.3f}/step at Phi=0.7")]
 
 
+@check
+def terrain_field_is_bigger_than_an_episode(config) -> list[Finding]:
+    """An episode must not be able to walk off the edge of the world.
+
+    Past the heightfield's extent there is no geom at all, so the humanoid falls into the
+    void. That is recorded as an ordinary termination, so it arrives in the metrics as
+    `fall_rate` and reads as a policy failure -- a geometry error wearing the costume of the
+    headline number. The same class as E16, where an eval that counted the wrong episodes
+    invalidated every fall rate in the project.
+
+    Budget: the largest forward command, held for a whole episode, times the measured
+    achieved/commanded speed ratio, starting from the worst corner of the spawn square.
+    """
+    t = getattr(config, "terrain", None)
+    if t is None or not t.enabled:
+        return [Finding(Severity.OK, "terrain extent", "terrain disabled")]
+
+    dt = config.env.decimation * 0.002
+    episode_s = config.env.max_episode_steps * dt
+    top_speed = max(abs(v) for v in config.task.lin_vel_x_range)
+    # 0.79 is measured (0.586 achieved against 0.738 commanded on the flat run). Using the
+    # ratio rather than the raw command is deliberate: quoting the command would size the
+    # field for a policy that does not exist, and quoting the achieved speed alone would
+    # size it for the policy that exists TODAY.
+    reach = t.spawn_half_extent + top_speed * 0.79 * episode_s
+    if reach > t.half_extent:
+        return [Finding(
+            Severity.CONTRADICTION, "terrain extent",
+            f"an episode can reach {reach:.1f} m from the origin "
+            f"(spawn {t.spawn_half_extent} m + {top_speed} m/s x 0.79 x {episode_s:.1f} s) "
+            f"but the field only extends to {t.half_extent} m. Off the field there is no "
+            f"geom, so the humanoid falls into the void and it is counted as a fall.",
+            remedy=f"Raise terrain.half_extent above {reach:.1f}, or lower "
+                   f"terrain.spawn_half_extent. Extent is nearly free: collision cost is set "
+                   f"by cell size, not by grid size.",
+            caught_before="Measured: hfield cost is 2.01x the plane at a 0.10 m cell whether "
+                          "the field is 4 m or 40 m across.",
+        )]
+    return [Finding(Severity.OK, "terrain extent",
+                    f"worst reach {reach:.1f} m inside a {t.half_extent} m half-extent")]
+
+
+@check
+def terrain_is_rough_enough_to_matter_and_not_so_rough_it_takes_over(config) -> list[Finding]:
+    """The relief must be visible to the gait clock without drowning it.
+
+    `gait_phase` is 27.8% of the reward budget and its stance transition is
+    `stance_transition_width` cycles wide. Stride-to-stride ground change converts into a
+    touchdown TIMING error, and once that error exceeds the transition width it is the
+    terrain, not the policy, that loses the clock -- at which point the run measures the
+    ground and no reward change can reach the result.
+
+    Never compare a constant, compare the quantity it stands for (E31b): the amplitude is
+    checked against a time, not against another length.
+    """
+    t = getattr(config, "terrain", None)
+    if t is None or not t.enabled:
+        return [Finding(Severity.OK, "terrain amplitude", "terrain disabled")]
+
+    task = config.task
+    transition_s = task.stance_transition_width / max(task.gait_frequency, 1e-6)
+    # Measured on the generated field: stride-to-stride change at p95 is ~0.44 of the
+    # peak-to-peak relief over a 0.30 m stride, and the swing apex implies a ~0.40 m/s
+    # descent at touchdown.
+    dz_p95 = 0.44 * t.amplitude_p2p
+    timing_err = dz_p95 / 0.40
+    ratio = timing_err / transition_s
+    if ratio > 1.0:
+        return [Finding(
+            Severity.CONTRADICTION, "terrain amplitude",
+            f"relief {t.amplitude_p2p*100:.2f} cm gives a touchdown timing error of "
+            f"{timing_err*1000:.0f} ms against a stance transition of "
+            f"{transition_s*1000:.0f} ms ({ratio:.2f}x). Past 1.0x the terrain rather than "
+            f"the policy is what loses gait_phase, which is 27.8% of the reward.",
+            remedy=f"Lower terrain.amplitude_p2p below "
+                   f"{0.40 * transition_s / 0.44 * 100:.1f} cm, or widen "
+                   f"task.stance_transition_width.",
+        )]
+    if ratio < 0.15:
+        return [Finding(
+            Severity.SUSPECT, "terrain amplitude",
+            f"relief {t.amplitude_p2p*100:.2f} cm is only {ratio:.2f}x the gait clock's "
+            f"tolerance. The run may be indistinguishable from flat ground.",
+            remedy="Raise terrain.amplitude_p2p, or accept that this is a control run.",
+        )]
+    return [Finding(Severity.OK, "terrain amplitude",
+                    f"{t.amplitude_p2p*100:.2f} cm p2p = {timing_err*1000:.0f} ms touchdown "
+                    f"error, {ratio:.2f}x the {transition_s*1000:.0f} ms stance transition")]
+
+
+@check
+def terrain_cell_supports_a_box_foot(config) -> list[Finding]:
+    """A foot must rest on more than one contact point.
+
+    Box feet were a deliberate model choice: MuJoCo's default capsule feet are line contacts
+    and physically cannot produce a heel-to-toe roll (README.md:66). A heightfield cell
+    coarser than the foot re-creates exactly that defect, because the foot bridges a single
+    cell and can transmit no ankle torque from the ground. Measured on this body: at a
+    0.15 m cell the median is 3 contacts per foot but the MINIMUM is 1; at 0.10 m the
+    minimum is 2.
+    """
+    t = getattr(config, "terrain", None)
+    if t is None or not t.enabled:
+        return [Finding(Severity.OK, "terrain cell", "terrain disabled")]
+    # The MimicKit foot is 0.177 x 0.090 m (geom half-sizes 0.0885 x 0.045). Contacts land
+    # on grid vertices under the footprint, so the count along an axis is roughly
+    # length/cell + 1. The binding requirement is on the LONG axis: it must span at least
+    # 1.5 cells, so at least two grid lines cross the foot and it cannot pivot on one point.
+    #
+    # Calibrated against the measured contact minimum rather than asserted: at cell 0.150 m
+    # the median is 3 contacts per foot but the MINIMUM is 1; at 0.100 m the minimum is 2.
+    # 0.177 / 1.5 = 0.118 m puts the bound between the two measurements, which is where a
+    # threshold derived from a model and checked against data should land.
+    foot_long = 0.177
+    max_cell = foot_long / 1.5
+    if t.cell > max_cell:
+        return [Finding(
+            Severity.CONTRADICTION, "terrain cell",
+            f"cell {t.cell:.3f} m exceeds {max_cell:.3f} m, so the foot's {foot_long:.3f} m "
+            f"long axis spans fewer than 1.5 cells and can rest on a single contact point. "
+            f"Measured at 0.150 m: median 3 contacts per foot, minimum 1. That is the "
+            f"line-contact defect box feet were chosen to avoid.",
+            remedy="Set terrain.cell at or below 0.10 m (measured minimum 2 contacts). Cost "
+                   "is 2.01x the plane there, and depends on cell size only, never on the "
+                   "field's extent.",
+            caught_before="README.md:66 -- capsule feet are line contacts and physically "
+                          "cannot produce a heel-to-toe roll, which is why this model has "
+                          "box feet at all.",
+        )]
+    return [Finding(Severity.OK, "terrain cell",
+                    f"cell {t.cell:.3f} m spans the {foot_long:.3f} m foot "
+                    f"{foot_long / t.cell:.1f} times (bound {max_cell:.3f} m)")]
+
+
 def run_all(config, checkpoint: Path | None = None) -> list[Finding]:
     """Every invariant. Failures inside a check are reported, never raised."""
     findings: list[Finding] = []

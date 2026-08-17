@@ -254,7 +254,13 @@ def render_episode(
                         f"t {step * env.dt:5.1f}s   {label}",
                         f"cmd  vx {command[0]:+.2f}  vy {command[1]:+.2f}  yaw {command[2]:+.2f}",
                         f"act  speed {speed:4.2f} m/s   slip {slip:4.2f} m/s",
-                        f"feet [{contact}]   height {float(data.qpos[2]):4.2f} m",
+                        # Height ABOVE THE GROUND, not world z. On terrain the raw qpos[2]
+                        # drifts with the hill under the humanoid, so a viewer watching the
+                        # overlay would read a rise as a stumble and a dip as a crouch. The
+                        # overlay is the instrument a person actually reads while watching,
+                        # and this project has caught three failures only by watching.
+                        f"feet [{contact}]   height "
+                        f"{float(data.qpos[2]) - float(env.state.ground_z[0]):4.2f} m",
                     ]
                 else:
                     # A task with no velocity command gets telemetry about what it IS doing.
@@ -347,18 +353,27 @@ def _encode(frames: np.ndarray, out_path: Path, fps: int) -> None:
 
 def build_render_env(
     model_path: str | Path, task, *, seed: int = 0, max_episode_steps: int = 100_000,
-    action_scale_mode: str = "fraction",
+    action_scale_mode: str = "fraction", terrain=None,
 ) -> ThreadedVecEnv:
     """A single-environment env suitable for rendering.
 
     Randomisation is off so the video shows nominal dynamics, and the episode limit is
     effectively removed so a scripted schedule is never cut short by a timeout.
+
+    `terrain` MUST be passed through when training on terrain, for the same reason
+    `action_scale_mode` must: a render env built on a plane while training runs on rough
+    ground produces a video of a robot that does not exist. That was measured, not feared --
+    the first terrain video rendered a perfectly flat checkerboard while every training env
+    was on a 5.25 cm field, which is the failure DESIGN.md:441 predicted arriving through a
+    different door than the one it was watching (the render env's own model, not a stale
+    GPU upload).
     """
     from humanoid_rl.envs.domain_rand import DomainRandConfig
 
     return ThreadedVecEnv(
         model_path,
         task,
+        terrain=terrain,
         # MUST match training. A render env built with a different action scale is a
         # different robot: the same policy output would move the joints by a different
         # amount, so the video would show behaviour the policy never produced. The trainer

@@ -20,6 +20,7 @@ import yaml
 
 from humanoid_rl.algos.ppo import PPOConfig
 from humanoid_rl.envs.domain_rand import DomainRandConfig
+from humanoid_rl.terrain import TerrainConfig
 from humanoid_rl.tasks.locomotion import LocomotionConfig
 from humanoid_rl.tasks.tracking import TrackingConfig
 from humanoid_rl.algos.amp import AMPConfig
@@ -152,6 +153,11 @@ class Config:
     #: mildly uneven (1.08 on stance fraction, 1.14 median across joint pairs), and AMP
     #: reproduces whatever it is shown, so mirroring removes that bias from the target.
     mirror_clips: bool = False
+    #: Rough ground. A top-level section rather than a field on `env` so that the Oracle's
+    #: `no_config_section_is_silently_ignored` check can see it at section granularity --
+    #: a terrain block that loads into nothing would be the quietest possible way to run a
+    #: "terrain" experiment on a flat floor.
+    terrain: TerrainConfig = field(default_factory=TerrainConfig)
     domain_rand: DomainRandConfig = field(default_factory=DomainRandConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     log: LogConfig = field(default_factory=LogConfig)

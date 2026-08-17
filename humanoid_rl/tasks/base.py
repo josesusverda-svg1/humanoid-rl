@@ -117,6 +117,18 @@ class BatchState:
     lin_vel_body: np.ndarray  # (N, 3) linear velocity in the body frame
     ang_vel_body: np.ndarray  # (N, 3) angular velocity in the body frame
     heading: np.ndarray  # (N,) yaw of the root in the world XY plane, radians
+    #: (N,) world z of the ground surface directly under the root. **Identically 0.0 on a
+    #: plane**, which is what makes every terrain-aware reward term an exact algebraic no-op
+    #: on flat ground rather than an approximate one -- the flat results stay bit-comparable
+    #: and a warm start across the change is exact.
+    #:
+    #: Computed once here rather than looked up by each consumer. There are seven consumers,
+    #: and E29's lesson is that a guarantee proved for one term does not transfer to another
+    #: term in the same function: seven independent lookups would drift apart.
+    ground_z: np.ndarray
+    #: (N, n_key) the same, under each key body. A humanoid's foot is not above its pelvis,
+    #: and on rough ground the difference is the whole point.
+    key_ground_z: np.ndarray
     #: Seconds of simulated time per control step, so tasks can express rewards in
     #: physical units rather than in steps.
     dt: float = 0.02

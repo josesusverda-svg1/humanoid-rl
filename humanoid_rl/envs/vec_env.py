@@ -91,11 +91,17 @@ class ThreadedVecEnv:
         seed: int = 0,
         domain_rand: DomainRandConfig | None = None,
         stagger_initial_episodes: bool = False,
+        terrain=None,
     ) -> None:
         # Loads the MJCF, converts its torque motors into PD position servos, derives the
         # standing pose, and adds foot touch sensors. See envs/model_prep.py.
-        self.prepared = prepare(model_path, action_scale_mode=action_scale_mode)
+        # Terrain, when enabled, is baked into the model HERE, before the domain-randomisation
+        # pool is copied, so every pool entry carries the identical field. See terrain/field.py
+        # for the three silent failures that makes impossible.
+        self.prepared = prepare(model_path, action_scale_mode=action_scale_mode,
+                                terrain=terrain)
         self.model = self.prepared.model
+        self._terrain = self.prepared.terrain
         self.task = task
         self.num_envs = int(num_envs)
         self.decimation = int(decimation)
@@ -195,6 +201,10 @@ class ThreadedVecEnv:
             lin_vel_body=np.zeros((n, 3)),
             ang_vel_body=np.zeros((n, 3)),
             heading=np.zeros(n),
+            # Stay exactly zero for the whole run when there is no terrain, which is what
+            # makes every downstream term bit-identical to a flat run.
+            ground_z=np.zeros(n),
+            key_ground_z=np.zeros((n, max(1, len(self.prepared.key_body_names)))),
             foot_force=np.zeros((n, self.n_feet)),
             torque=np.zeros((n, self.nu)),
             prev_joint_vel=np.zeros((n, self.nu)),
@@ -402,6 +412,14 @@ class ThreadedVecEnv:
             s.head_height_ratio[idx] = sens[:, self._head_adr + 2] / self._standing_head
         if self._key_cols.size:
             s.key_body_pos[idx] = sens[:, self._key_cols].reshape(-1, self.n_key_bodies, 3)
+        # Terrain height, computed once for every consumer. Measured cost at 4096 envs on the
+        # 801x801 grid: 0.346 ms per control step against a 76.6 ms batch control step, 0.45%.
+        # Left untouched (and therefore identically zero) when there is no terrain.
+        if self._terrain is not None:
+            s.ground_z[idx] = self._terrain.height_at(s.qpos[idx, 0], s.qpos[idx, 1])
+            if self._key_cols.size:
+                kp = s.key_body_pos[idx]
+                s.key_ground_z[idx] = self._terrain.height_at(kp[..., 0], kp[..., 1])
 
     def _update_foot_air_time(self) -> None:
         """Track how long each foot has been airborne, and flag touchdowns.
