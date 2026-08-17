@@ -70,7 +70,30 @@ lists what it invalidated.
 
 ## Current state
 
-Best policy: `runs/envelope-20260814-100402/checkpoints/best.pt`, **iteration 3100**.
+Best policy: `runs/final-s0-20260816-201017/checkpoints/best.pt` (E51). The previous holder,
+`runs/envelope-20260814-100402` iteration 3100, is kept below as the baseline every E51 number
+is quoted against.
+
+| Metric | final-s0 | envelope best.pt | Condition | Human |
+|---|---|---|---|---|
+| speed | **0.851** | 0.694 | held 1.0 m/s command | 1.2-1.4 |
+| tracking ratio | **0.85** | 0.69 | held 1.0 m/s command | 1.0 |
+| torso_upright | **0.803** | 0.658 | held 1.0 m/s command | 0.95-1.00 |
+| torso tilt | **36.6 deg BACK** | 48.5 deg BACK | held 1.0 m/s command | upright |
+| deterministic falls | **0%** | fails the gate | 1.0 m/s, 1200 steps | 0% |
+| eval falls | **9.4% median** | 15.6% | **NOT COMPARABLE**: 2500-step limit vs 1000 | 0-5% |
+
+The fall rates in the last row are measured under different episode limits and must not be
+compared as if they were one number -- surviving 20 s is a 2.5x harder bar than surviving 8 s.
+This table has produced a policy that does not exist once already, by mixing conditions in one
+column.
+
+**AMP readiness: READY (E51).** Gates 1-3 all pass: deterministic falls 0% (need <20%), no
+noise crutch (1200 steps deterministic vs 1200 with noise), worst tracking ratio 0.84 inside
+the 0.52-1.24 m/s clip band (need >=0.70). Gate 4 (step rate and stride, from
+`scripts/gait_report.py`) is NOT yet measured on this policy.
+
+The stale numbers this table used to carry, kept so the change is legible:
 
 READ THE CONDITION COLUMN. An earlier version of this table mixed three different
 measurement conditions into one column and produced a policy that does not exist.
@@ -90,11 +113,94 @@ The often-quoted `torso_upright 0.543` belongs to iteration **5050**, a later an
 checkpoint (return 2328, falls 29.7%) that was never selected as best. Quoting it beside
 iteration 3100's return described a policy that never existed.
 
-AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
+AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- superseded by E51.**
 
 ## Entries
 
 Newest first. `E##  date  what changed`.
+
+### E51  2026-08-17  E50 VERDICT: **MIXED**. The exam is passed; three of my bars were unreachable by construction
+
+**Run**: `runs/final-s0-20260816-201017`, 11,393 iterations, 2.80 B env steps, 15.2 h. Ran its
+whole budget. No kill criterion fired.
+
+**Scored mechanically by `scripts/score_final_run.py`, whose thresholds are copied from E50
+and which reports BOTH clauses of every conjunction separately.** That second property is not
+decoration: I reported "P2 is passing" twice from the slope alone while the endpoint clause of
+my own prediction was failing, and only the script caught it.
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | `action_std` never exceeds 0.501 | **PASS**. Max 0.4966, pinned on the ceiling, final 0.379 |
+| 2 | PRIMARY: slope >= -0.10/1B **AND** last >= first | **FAIL**, split: slope **-0.048** [pass], endpoints 0.955 -> 0.766 [FAIL] |
+| 3 | Some eval with upright>=0.85 AND falls<=0.15 AND speed>=0.75 | **FAIL**. Never simultaneous |
+| 4 | mean_speed >= 0.85 and ratio >= 0.80 | **FAIL** on speed (0.661), **pass** on ratio (0.893) |
+| 5 | gait_score >= 0.40 at falls<=0.30 and speed>=0.60 | **FAIL**. Best qualifying 0.342 |
+| 6 | `amp_readiness.py` gates 1-3 | **PASS. All three. "VERDICT: ready for AMP"** |
+| 7 | Torso tilt < 30 deg | **FAIL**. 36.6 deg, from a baseline of 48.87 |
+| 8 | Seed spread < 3.0x | pending segment 2 |
+
+**2 of 7. And the run is nevertheless the best this project has produced, which is why the
+verdict is MIXED and not WORSE.** The exam that gates the entire next phase, and that has
+never once been passed, is passed:
+
+```
+speed tracking, deterministic          survival vs exploration noise (1.0 m/s command)
+ commanded  achieved  ratio  falls      noise std   falls  ep length  speed
+      0.50      0.42   0.84     0%           0.00      0%       1200   0.85
+      0.80      0.67   0.84     0%           0.50      0%       1200   0.87
+      1.00      0.85   0.85     0%           1.00      0%       1200   0.91
+[ok] stays up   [ok] no noise crutch   [ok] obeys speed        VERDICT: ready for AMP
+```
+
+The header of this file has read "AMP readiness: NOT ready. Passes 'stays up', fails 'obeys
+speed'" since E09. `best.pt` did 0.694 m/s at a held 1.0 m/s command, ratio 0.69, one point
+under the gate. This policy does **0.85 m/s at ratio 0.85 with 0% falls**, and it does not
+degrade when the exploration noise is removed, which is the check that catches a policy using
+its own noise as a controller.
+
+**THREE OF MY BARS WERE UNREACHABLE BY CONSTRUCTION, AND THAT IS THE ENTRY.** P3, P4 and P5
+are all stated on `eval/mean_speed`, which is an average over the COMMAND DISTRIBUTION. That
+distribution's median commanded speed is **0.731 m/s** (measured over the last 30 evals, max
+0.801). P3 asked for a mean of 0.75 and P4 for 0.85. **I set a speed bar above what the
+commands, on average, ask for.** A policy tracking its command perfectly at ratio 1.0 would
+score 0.731 and fail both. Meanwhile the same policy, asked for 1.0 m/s and measured at that
+command, delivers 0.851.
+
+That is E31b's rule turned on its author: *never compare a constant, compare the quantity it
+stands for.* I compared an achieved average against a capability threshold, and the two live
+in different spaces. The bars are not being moved -- E48's lesson is that weakening an
+acceptance bar to fit a result is the move this project has regretted every time -- they are
+recorded as **mis-specified**, which is a different admission and a worse one, because a moved
+bar is dishonest and a mis-specified bar was never a measurement at all.
+
+The correct form for a future run is a bar on the TRACKING RATIO at a stated command, which
+P4's second clause already had, and which passed at 0.893.
+
+**What the horizon actually bought, against the right baseline.**
+
+| | best.pt (envelope) | final-s0 | condition |
+|---|---|---|---|
+| torso_upright | 0.658 | **0.803** | held 1.0 m/s command |
+| speed | 0.694 | **0.851** | held 1.0 m/s command |
+| deterministic falls | fails the gate | **0%** | 1.0 m/s, 1200 steps |
+| torso tilt | 48.87 deg BACK | **36.6 deg BACK** | held 1.0 m/s command |
+| eval falls | 15.6% at a 1000-step limit | **9.4% median at 2500** | a 2.5x harder bar |
+| gait_score | 0.21 | 0.342 | best qualifying eval |
+
+**P2 is the honest disappointment.** The slope clause passed with room -- **-0.048/1B against
+a -0.659 baseline**, a 13.7x reduction, so the monotone collapse that ended every previous
+locomotion run is gone. The endpoint clause failed: 0.955 -> 0.766. Both are true and they
+describe one thing: the policy spent posture to buy speed early (0.312 m/s at 200M against
+0.765 at the end) and then held roughly flat rather than recovering. E50 named `gae_lambda`
+in advance as the residual **if P7 failed while P2 and P3 passed**; that antecedent did not
+occur, so the pre-registered conclusion does NOT fire and `gae_lambda` remains an untested
+suspicion rather than a finding.
+
+**Segment 2** (`configs/final_s1.yaml`, seed 1, byte-identical but for `run.name` and
+`run.seed`, verified by diff) launched automatically on segment 1's exit via
+`scripts/chain_segment2.sh`, which refuses to chain if segment 1 stopped short of 11,000 of
+11,393 iterations. It reached 11,393.
 
 ### E50  2026-08-16  E49 VERDICT, and the last run goes to the track that was never configured
 
