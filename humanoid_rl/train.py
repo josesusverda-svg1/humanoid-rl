@@ -43,6 +43,7 @@ from humanoid_rl.config import Config, resolve_device
 from humanoid_rl.envs.vec_env import ThreadedVecEnv
 from humanoid_rl.evaluate import evaluate
 from humanoid_rl.logging_utils.metrics import EpisodeStats, RunLogger
+from humanoid_rl.oracle import invariants
 from humanoid_rl.render import SHORT_SCHEDULE, build_render_env, render_episode
 from humanoid_rl.tasks.locomotion import LocomotionTask
 from humanoid_rl.tasks.tracking import TrackingTask
@@ -56,6 +57,7 @@ class Trainer:
 
     def __init__(self, config: Config, resume_dir: str | None = None) -> None:
         self.cfg = config
+        self._gate_on_oracle(config)
         self.hw = hardware.detect()
 
         # Reproducibility. Every stochastic component is seeded from the one config value.
@@ -193,7 +195,7 @@ class Trainer:
         """Construct the objective named by `run.task`."""
         kind = config.run.task
         if kind == "locomotion":
-            return LocomotionTask(config.task)
+            return LocomotionTask(config.task, seed=config.run.seed)
         if kind == "getup":
             from humanoid_rl.tasks.getup import GetUpTask
 
@@ -256,6 +258,19 @@ class Trainer:
             t0 = time.perf_counter()
             res = self.env.step(action_np)
             t_env += time.perf_counter() - t0
+
+            # One non-finite reward out of 4096 envs destroys the whole update, not just its
+            # own env: GAE propagates it down the rollout, and `advantages.mean()/std()` in
+            # ppo.py then turns the entire batch to NaN. Measured on RolloutBuffer: 1 NaN
+            # reward in 1 of 8 envs on 1 of 4 steps -> 3/32 advantages NaN -> 32/32 after
+            # normalisation. The policy is destroyed permanently and silently, because
+            # `is_best = NaN > best_return` is False forever after, so no new best.pt is
+            # written and the run keeps burning wall-clock looking healthy.
+            #
+            # vec_env computes the reward BEFORE its own NaN guard (vec_env.py:668 against
+            # the isfinite check in terminated_batch at :677), so a non-finite value is
+            # already inside StepResult by the time it arrives here. Contain it at the door.
+            np.nan_to_num(res.reward, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
             # Adversarial motion prior: blend the discriminator's verdict into the reward
             # before it reaches the buffer. Done here rather than inside the task because
@@ -614,11 +629,52 @@ class Trainer:
             f"eta {eta_h:>5.1f}h"
         )
 
+    # ------------------------------------------------------------------ launch gate
+
+    @staticmethod
+    def _gate_on_oracle(config: Config) -> None:
+        """Refuse to start on a config the project's own invariants call contradictory.
+
+        `scripts/oracle.py` has existed since E11 and exits 1 on a contradiction so that it
+        can gate a launch. Nothing ever called it from the training entry point, so it only
+        gated the launches someone remembered to run it before. It would have caught both
+        faults `configs/default.yaml` carried for its whole life -- gamma 0.99 as a 0.80 s
+        horizon at 125 Hz (E31) and log_std_max 5.0 as no ceiling at all (E30) -- and the
+        second of those measurably cost the best locomotion run its posture.
+
+        Set HUMANOID_SKIP_ORACLE=1 to run a deliberately contradictory config; it prints
+        loudly, because a silent override is the same defect one level up.
+        """
+        if os.environ.get("HUMANOID_SKIP_ORACLE") == "1":
+            print("oracle: SKIPPED by HUMANOID_SKIP_ORACLE=1")
+            return
+        blocking = [
+            f for f in invariants.run_all(config)
+            if f.severity in (invariants.Severity.CONTRADICTION, invariants.Severity.UNREACHABLE)
+        ]
+        if not blocking:
+            return
+        print("\noracle: refusing to launch\n")
+        for f in blocking:
+            print(f"  {f.line()}")
+            if f.remedy:
+                print(f"     fix: {f.remedy}")
+        raise SystemExit(
+            f"\n{len(blocking)} blocking finding(s). Training cannot fix a setup problem, "
+            "and every hour spent running is spent on the wrong objective."
+        )
+
     # ------------------------------------------------------------------ checkpoints
 
     def save_checkpoint(self, best: bool = False) -> None:
         name = "best.pt" if best else f"iter_{self.iteration:08d}.pt"
         path = self.logger.checkpoint_dir / name
+        # Write-then-rename, because `torch.save` writes in place. best.pt IS the
+        # deliverable and is rewritten on every new record, and --resume loads
+        # sorted(glob("iter_*.pt"))[-1], which is precisely the file an interrupt would
+        # truncate. os.replace is atomic within a filesystem, so a kill at any instant
+        # leaves either the old complete file or the new complete file, never a stump.
+        tmp = path.with_suffix(".pt.tmp")
         torch.save(
             {
                 "iteration": self.iteration,
@@ -630,8 +686,9 @@ class Trainer:
                 "ppo": self.ppo.state_dict(),
                 "config": self.cfg.to_dict(),
             },
-            path,
+            tmp,
         )
+        os.replace(tmp, path)
         self.logger.log_event(
             "checkpoint",
             path=str(path.relative_to(self.logger.run_dir)),

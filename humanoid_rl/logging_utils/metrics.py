@@ -88,16 +88,20 @@ class RunLogger:
 
 def _jsonable(value: Any) -> Any:
     """Convert numpy scalars and arrays into plain JSON types."""
+    # The non-finite test comes FIRST. It used to sit below the numpy branch, so a
+    # np.float32('nan') returned .item() and json.dumps wrote the bare token NaN, which is
+    # not valid JSON -- exactly the failure the comment below says this prevents. Latent
+    # only because every metric happens to arrive as a Python float today.
+    if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+        # JSON has no NaN or Infinity. Emitting them produces a file the dashboard's
+        # JSON parser rejects, which would break the whole live view.
+        return None
     if isinstance(value, (np.floating, np.integer)):
         return value.item()
     if isinstance(value, np.bool_):
         return bool(value)
     if isinstance(value, np.ndarray):
         return value.tolist()
-    if isinstance(value, float) and not np.isfinite(value):
-        # JSON has no NaN or Infinity. Emitting them produces a file the dashboard's
-        # JSON parser rejects, which would break the whole live view.
-        return None
     return value
 
 

@@ -427,8 +427,19 @@ class LocomotionTask(Task):
         "dof_pos_limits",
     )
 
-    def __init__(self, config: LocomotionConfig | None = None) -> None:
+    def __init__(self, config: LocomotionConfig | None = None,
+                 seed: int = 0) -> None:
         self.cfg = config or LocomotionConfig()
+        # The task's OWN generator, and it is never rebound afterwards. One task object is
+        # shared by the training env, the evaluation env and the render env, and
+        # `init_state` used to assign `self._rng = rng`, so it ended up pointing at
+        # whichever env was constructed last. After the first video render, training's
+        # mid-episode command redraws and the difficulty sampler were drawing from the
+        # render env's stream, and the eval env's draws at eval N depended on how much
+        # training had happened to redraw in between. That makes two evaluations of two
+        # checkpoints incomparable, which is the assumption the entire best-checkpoint
+        # selection rests on.
+        self._rng = np.random.default_rng(seed)
         self._limit_lo = np.full(28, -1e9)
         self._limit_hi = np.full(28, 1e9)
         #: qpos index per ACTUATOR. Set from the prepared model; the fallback assumes the
@@ -515,8 +526,8 @@ class LocomotionTask(Task):
         state.task_state["penalty_scale"] = float(self.cfg.penalty_scale_init)
         state.task_state["episode_len_ema"] = 200.0
         # The task owns a generator so mid-episode redraws do not need one threaded in
-        # through `on_batch_end`, which the engine calls without one.
-        self._rng = rng
+        # through `on_batch_end`, which the engine calls without one. It is created once in
+        # __init__ and deliberately NOT rebound here -- see the note there.
         state.task_state["lead"] = np.zeros(state.num_envs, dtype=np.int64)
         state.task_state["lead_swaps"] = np.zeros(state.num_envs)
         state.task_state["gait_steps"] = np.zeros(state.num_envs)

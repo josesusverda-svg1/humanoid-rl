@@ -96,6 +96,213 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".
 
 Newest first. `E##  date  what changed`.
 
+### E50  2026-08-16  E49 VERDICT, and the last run goes to the track that was never configured
+
+**E49 scored against its own predictions.** Three arms, all supine, same five waypoints:
+
+| arm | rise budget | speed penalty | waypoint index | final pelvis | predicate |
+|---|---|---|---|---|---|
+| A | 3.75 s | on | time | 0.875 | 66% |
+| B | 5.5 s | off | time | 0.181 | 0% |
+| **C** | **5.5 s** | **off** | **PELVIS HEIGHT** | **0.181** | **0%** |
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | Height-indexing stands where arm B did not; predicate > 0% is the signal | **NO.** 0.181, 0%, identical to arm B to three decimals |
+| 2 | If it fails identically, the class explanation is INCOMPLETE, not confirmed in reverse | **TRIGGERED.** This is the entry |
+| 3 | The report names the arm being compared against | held: arm B |
+
+**VERDICT: the closed loop bought nothing, and prediction 2 says what that means.** E49 wrote
+down in advance that an identical failure would NOT confirm the "open-loop schedules cannot
+rise slowly" story, because height alone says nothing about which way the body is tipping.
+That is the honest reading and it is the one recorded here. Arm C's own numbers say the
+feedback never engaged: peak pelvis 0.640, *below* arm B's 0.857, so height-indexing did not
+merely fail to correct the deviation, it explored a worse region.
+
+**What is now established, and it closes a branch.** Across E47-E49 the reference has been
+attacked four ways: reversed descent (unexecutable, E47), hand-authored rising waypoints
+(0 of 1200), open-loop CEM search (a ballistic kip-up, 66%, blocked on "not ballistic"), and
+now the cheapest closed loop. **No usable get-up reference clip exists.** `configs/getup.yaml`
+still trains 30% of its episodes against `getup_refs_v1.npz` at `w_track: 2.0` — a film E47
+measured as unperformable. That is not a tuning problem, and no further generation count
+fixes it.
+
+**Then the audit turned to the other track, and found the actual headline.**
+
+```
+$ .venv/bin/python scripts/oracle.py --config configs/default.yaml
+2 contradictions, 0 unreachable, 1 suspect, 8 ok
+$ .venv/bin/python scripts/oracle.py --config configs/getup.yaml
+0 contradictions, 0 unreachable, 1 suspect, 12 ok
+```
+
+**Both contradictions are findings this project already made, and then applied to the get-up
+config only.** `gamma: 0.99` at 125 Hz is the 0.80 s horizon of E31, against a 1.111 s gait
+cycle — one full cycle discounted to 0.2476. `log_std_max: 5.0` is the non-ceiling of E30,
+which cost that run 833 -> 19 in eval return. E30 and E31 are the **only two clean WORKED
+verdicts in this logbook**, and neither was ever carried across to the config the README says
+the project is for. The locomotion track has never once been trained under a configuration
+its own invariant checker accepts.
+
+It is visible in the run that produced the current `best.pt`. Over 5,086 iterations
+`action_std` climbed 0.389 -> 1.447, r(iteration) = **+0.954**, while `torso_upright` fell
+0.961 -> 0.543, r(action_std) = **-0.851**. Best is iteration 3,100; every eval after it is
+worse. The file's own comment at `default.yaml:79-87` measures that std 1.0 destroys 49% of
+the reward and argues for std 0.50 — and the line directly beneath it sets 5.0.
+
+**Nothing in `train.py` had ever called the Oracle.** `scripts/oracle.py` has exited 1 on a
+contradiction since E11 specifically so it could gate a launch, and it only ever gated the
+launches someone remembered to run it before. Now fixed: `Trainer._gate_on_oracle` refuses to
+start, overridable only by `HUMANOID_SKIP_ORACLE=1`, which prints loudly.
+
+**Three more live defects, none of them logged before, all fixed:**
+
+| defect | mechanism | why it matters over days |
+|---|---|---|
+| **One NaN reward destroys the whole batch** | `vec_env.py:668` computes reward BEFORE its own isfinite guard at `:677`. GAE spreads it down the rollout; `advantages.mean()/std()` then converts all 4096 envs. Measured: 1 NaN in 1 of 8 envs on 1 of 4 steps -> 3/32 advantages -> **32/32** after normalisation | `is_best = NaN > best_return` is False forever after, so no further `best.pt` is written and the run burns the remaining days looking healthy |
+| **Checkpoints written in place** | `torch.save(..., path)`, and `--resume` loads `sorted(glob("iter_*.pt"))[-1]` — exactly the file an interrupt truncates. `best.pt` IS the deliverable | a laptop run of this length will be interrupted |
+| **The Task's RNG was rebound per env** | `init_state` did `self._rng = rng`, and ONE task object is shared by the train, eval and render envs, so it pointed at whichever was built last. After the first video, training's command redraws consumed the render env's stream | two evaluations of two checkpoints are not comparable, which is the assumption best-checkpoint selection rests on |
+
+**THE FINAL RUN.** Locomotion, `configs/final.yaml`, oracle-green (0 contradictions, 10 ok).
+Three segments of ~14.6 h; measured at full scale before launch, 53,178 sps and 4.62 s per
+245,760-step iteration. Segments 1-2 are locomotion at seeds 0 and 1. Segment 3 is the
+reduced get-up "catch-and-hold" — rise from a validated mid-rise state and hold — chosen by
+the user over a fourth locomotion seed, and it will be reported as fall recovery from a
+crouch, not as standing up off the floor.
+
+Ten changes, and **not one of them is a reward weight**. Every locomotion win in this logbook
+is about what is COMMANDED or how it is OPTIMISED (E14 envelope, E13 cadence, E12 stance,
+E30 exploration, E32 discount); every reward change produced an exploit or NO EFFECT.
+
+| key | old | new |
+|---|---|---|
+| `ppo.gamma` | 0.99 (0.80 s) | **0.997** (2.67 s, 2.4 gait cycles) |
+| `ppo.horizon` | 24 (0.192 s) | **60** (0.48 s; also holds `gamma^horizon` at 0.835) |
+| `ppo.num_minibatches` | 4 | **10**, keeping the minibatch at 24,576 so horizon moves alone |
+| `ppo.log_std_max` | 5.0 (std 148) | **-0.70** (std 0.4966) |
+| `network.init_noise_std` | 0.8 | **0.45**, below the ceiling, because starting above a clamp is E05 |
+| `task.difficulty_init/min` | absent -> 0.75 | **1.0** (at 0.75 the median command is 0.529 m/s, a crawl the oracle cannot see because its check hardcodes 1.0) |
+| `run.total_env_steps` | 500M (**2.84 h**) | **2.8B** (14.6 h) |
+| `log.keep_last_checkpoints` | 5 (4.4% of the run) | **200** |
+| `eval.num_episodes` | 32 | **64**, which is what the evaluator already produced |
+| 4 dead task keys | present | **deleted** (read by nothing; `reward_batch` still uses one shared error) |
+
+`entropy_coef` stays **0.01**, against the first draft. The comment above it argues for zero
+on the grounds that a ceiling is "a gradient sink" — which is E05's mistake restated, since
+`clamp_log_std()` runs in place after every optimiser step and E30 verified exactly that
+distinction. `gae_lambda` stays 0.95 and is **the largest known defect left in the file**:
+credit for observed reward decays over 0.151 s here against ~0.333 s at the references, the
+same rate-copy class as gamma. One novel high-variance lever is enough for a last run.
+
+**Pre-registered, before launch:**
+
+1. **P1 is a GUARD, not a test, and saying so in advance is the point.** The 12-iteration
+   smoke run already measured `action_std` falling 0.447 -> 0.408 under this config, so the
+   ceiling is not expected to bind. **FALSIFIED IF** `action_std` exceeds 0.501 anywhere,
+   which would mean the clamp is not running — kill instantly, do not debug live.
+2. **PRIMARY: the degradation stops.** Slope of `eval/torso_upright` from 200M steps to the
+   end is >= **-0.10 per 1B steps**, and the final eval is >= the 200M eval. Baseline:
+   **-0.659 per 1B**, 0.961 -> 0.543, never recovering.
+3. **The deliverable posture, never once met**: some eval reaches `torso_upright >= 0.85`
+   AND `fall_rate <= 0.15` AND `mean_speed >= 0.75` m/s **simultaneously**. Best.pt is
+   0.726 / 0.156 / 0.589 — and its 0.156 was at a 1000-step limit, not 2500, so fall rate
+   here is a 2.5x harder bar and is **not comparable to any earlier number**.
+4. **Human-likeness with a speed floor.** `gait_score` overall >= **0.40** at an eval with
+   `fall_rate <= 0.30` **AND `mean_speed >= 0.60` m/s**. The speed conjunct is not
+   decoration: scoring all 618 complete eval rows in `runs/`, 0.4418 has *already* been
+   reached at fall 0.062 — by a **0.319 m/s crawl**. `gait_score` has no absolute-speed
+   band, so it is maximised by walking slowly, which is E14's failure mode wearing the
+   project's own headline metric. Without the conjunct this prediction is vacuous.
+5. **The backward lean, the boldest and least-supported.** `posture_score.py --command 1.0`:
+   tilt < **30 deg** and backward share < 90%. Re-measured today: **48.87 deg, backward in
+   100.0% of samples**. Honest in advance: of three live explanations I fix one fully (E25's
+   actuator-order bug — **no locomotion policy has ever been trained since that fix landed**),
+   one partially (the horizon, but not `gae_lambda`), and leave E23's third untouched. If 5
+   fails while 2 and 3 pass, the pre-registered conclusion is that `gae_lambda` is the
+   remaining half of the rate-copy bug, and that is the entry to write.
+6. **The project's own exam**: `scripts/amp_readiness.py` passes gates 1-3.
+7. **The seed hedge is a hedge, NOT a test.** E22b's 7.6x bifurcation was measured on a pair
+   that *already ran* these low-noise exploration settings, so the question "does the
+   attractor survive the exploration fix" is answered — it does. Segment 2 exists to buy a
+   second draw, not to learn something.
+
+**Kill criteria, and the thresholds are calibrated on COLD starts.**
+
+- **K1, at 100M steps (iter 407, ~32 min):** training `episode_length` < **300**. The two
+  genuinely cold locomotion runs read 471.1 and 377.7 at this point; the 1000-step figure in
+  the first draft came from two runs that were both *warm-started*, and would have aborted
+  every seed 32 minutes in. Early episode length is set by time-to-fall, not by the
+  truncation limit, so raising the limit to 2500 does not raise it.
+- **K2, at 500M steps:** `action_std` < 0.10 AND median `eval/episode_return` over the last
+  5 evals < 1500. Relaunch that seed with `entropy_coef: 0.005`.
+- **K3, at 1.0B steps:** median `eval/fall_rate` over the last 10 evals > 0.60 **AND**
+  median `eval/torso_upright` < 0.60. **Both required.** Fall rate alone fires on the
+  baseline, which oscillated 12.5-96.9% with no trend (sd 0.215).
+- **K4, the anti-rescue rule:** if segment 1 finishes without satisfying prediction 3, do
+  NOT re-tune and do NOT relaunch it. Run segment 2 as configured. E44 pre-committed to a
+  decision point and E45/E46 then made two more parameter changes after it.
+- **K5, hard stop on scope:** no mid-run config edit. `--resume` reloads the config file and
+  skips re-snapshotting it, so a resumed run's directory would advertise a configuration it
+  is not running. If something must change, it is a new run directory.
+
+### E49  2026-08-16  E48 VERDICT: failed, and the pre-registered fix would have been wrong
+
+**E48 scored against its own predictions:**
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | PRIMARY: a family reaches predicate >= 90% | **NO.** All four at 0%, final pelvis 0.181 |
+| 2 | Peak rise speed below 1.0 m/s in the winners | N/A, no winners |
+| 3 | Risk: penalty makes standing unreachable; respond `--w-rush 0.5` | **TRIGGERED, and the response was wrong** |
+| 4 | Watch for slow rise then slow topple | **YES**, that is exactly what happened |
+| 5 | Nothing trained until replayed and looked at | held |
+
+**Prediction 3 is the entry.** The pre-registered response was to halve the speed penalty. The
+arithmetic said otherwise before any of it ran (the penalty costs ~0.45 where a stand pays
+~5.3, twelve times smaller), so instead of applying the fix, a two-arm experiment on the same
+start pose separated the two changes E48 had made together:
+
+| arm | rise budget | speed penalty | final pelvis | predicate |
+|---|---|---|---|---|
+| A | 3.75 s | **on** | **0.875** | **66%** |
+| B | 5.5 s | **off** | 0.181 | 0% |
+
+**The speed penalty is not what killed it. The rise budget is.** With the penalty on and the
+short budget the kip-up came back and scored 66%, statistically the same as the 65% it scored
+with no penalty at all. With no penalty and the long budget, nothing stands.
+
+Had the pre-registered response been applied without checking, it would have halved a
+coefficient that was never binding, produced another failure, and pointed at the acceptance
+bar next. **Pre-registration protects against fitting the story to the result. It does not
+protect against a wrong causal model, and this is the first time in this logbook that a
+pre-registered response has been overruled by measurement rather than by argument.**
+
+**Why the budget is what matters, and it is not a tuning fact.** Arm B did reach pelvis 0.857
+transiently and then ended at 0.181. It is not that the body cannot rise slowly; it is that it
+cannot rise slowly AND STAY. Between lying and standing the body passes through postures where
+a deviation grows on its own. A schedule of servo targets indexed by TIME has no way to notice
+a deviation, let alone correct one, so its only route across that region is to cross it faster
+than the deviation grows. Give it more time and the deviation wins.
+
+That is a property of the SOLUTION CLASS. It says an open-loop search cannot produce a
+human-like get-up reference at any compute budget, which retires the whole "search harder"
+branch, and it says nothing whatever about the humanoid.
+
+**E49 test, one variable against arm B**: same 5.5 s budget, same zero penalty, same five
+waypoints, but the commanded waypoint is chosen by CURRENT PELVIS HEIGHT instead of elapsed
+time (`--by-height`). Slip back down and the command rewinds; get ahead and it moves on. That
+is the cheapest possible closed loop, and it is a direct test of the class explanation rather
+than of a coefficient.
+
+**Pre-registered, and this time the causal claim is stated so it can be wrong:**
+1. **If the class explanation is right, height-indexing stands where arm B did not**, at the
+   same budget and with no speed penalty. Predicate > 0% is the signal; >= 90% is the win.
+2. **If it fails identically at 0.181**, the class explanation is INCOMPLETE, not confirmed in
+   reverse: height alone may be too weak a feedback signal (it says nothing about which way
+   the body is tipping). The response is a richer feedback signal, not more generations.
+3. Whatever happens, the report says which arm it is being compared against. E48's failure
+   was legible only because arm A existed to compare it to.
+
 ### E48  2026-08-16  The body CAN stand up. It just does it like a gymnast.
 
 **The first complete search answered the question this project could not answer in sixteen

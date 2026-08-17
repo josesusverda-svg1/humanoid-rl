@@ -79,7 +79,8 @@ class SearchTask(GetUpTask):
 
 
 def rollout(env: ThreadedVecEnv, targets: np.ndarray, seg_steps: int, hold_steps: int,
-            record: bool = False, speed_ok: float = 0.6, w_rush: float = 1.5):
+            record: bool = False, speed_ok: float = 0.6, w_rush: float = 1.5,
+            by_height: bool = False):
     """Run one batch of candidates. `targets` is (N, waypoints, nu) in action units.
 
     Servo targets ramp linearly from the previous waypoint to the next, then the hold
@@ -125,11 +126,37 @@ def rollout(env: ThreadedVecEnv, targets: np.ndarray, seg_steps: int, hold_steps
             frames_q.append(s.qpos.copy())
             frames_v.append(s.qvel.copy())
 
-    for w in range(n_way):
-        goal = targets[:, w, :].astype(np.float32)
-        for t in range(seg_steps):
-            advance(current + (goal - current) * ((t + 1) / seg_steps), False)
-        current = goal
+    if by_height:
+        # CLOSED LOOP. The waypoint the body is being driven toward is chosen by how far up
+        # it already is, not by how long it has been trying. If it slips back down, the
+        # command rewinds with it; if it gets ahead, the command moves on.
+        #
+        # This exists because an open-loop schedule provably cannot rise slowly here. Measured
+        # two ways on the same start pose: a 3.75 s ramp WITH a speed penalty stands (pelvis
+        # 0.875, predicate 66%), a 5.5 s ramp with NO penalty does not (0.181, 0%) despite
+        # transiently reaching 0.857. Between lying and standing the body passes through
+        # postures where a deviation grows on its own, and a schedule with no feedback can
+        # only cross that region faster than the deviation grows. Give it more time and the
+        # deviation wins. That is a property of the solution class, not of the body.
+        z0, z1 = float(env.state.root_height.mean()), env.prepared.standing_height
+        for _ in range(n_way * seg_steps):
+            u = np.clip((env.state.root_height - z0) / max(z1 - z0, 1e-6), 0.0, 1.0)
+            pos = u * (n_way - 1)
+            lo = np.floor(pos).astype(int)
+            hi = np.minimum(lo + 1, n_way - 1)
+            frac = (pos - lo)[:, None]
+            goal = (targets[np.arange(n), lo] * (1.0 - frac)
+                    + targets[np.arange(n), hi] * frac).astype(np.float32)
+            # Rate-limited so the command cannot teleport when the height jumps.
+            step_max = 2.0 / seg_steps
+            current = current + np.clip(goal - current, -step_max, step_max)
+            advance(current, False)
+    else:
+        for w in range(n_way):
+            goal = targets[:, w, :].astype(np.float32)
+            for t in range(seg_steps):
+                advance(current + (goal - current) * ((t + 1) / seg_steps), False)
+            current = goal
     zero = np.zeros((n, env.nu), dtype=np.float32)
     for _ in range(hold_steps):
         advance(zero, True)
@@ -163,6 +190,12 @@ def main() -> int:
     ap.add_argument("--explore", type=float, default=0.35,
                     help="injected sampling noise, decayed to zero over the run")
     ap.add_argument("--sigma-floor", type=float, default=0.08)
+    ap.add_argument("--seg-seconds", type=float, default=SEG_SECONDS,
+                    help="seconds per waypoint ramp; the rise budget")
+    ap.add_argument("--hold-seconds", type=float, default=HOLD_SECONDS,
+                    help="seconds of hold at the nominal stand, where the predicate is judged")
+    ap.add_argument("--by-height", action="store_true",
+                    help="closed loop: pick the waypoint by current pelvis height, not by time")
     ap.add_argument("--speed-ok", type=float, default=0.6,
                     help="root speed budget in m/s; anything above it is penalised")
     ap.add_argument("--w-rush", type=float, default=1.5,
@@ -195,8 +228,8 @@ def main() -> int:
     # The hardest exam level, not the one the curriculum happens to sit on. A reference is
     # worth having only if it satisfies the predicate the run is ultimately graded by.
     task._exam_level = len(cfg.getup.exam_levels) - 1  # noqa: SLF001
-    seg_steps = max(1, int(round(SEG_SECONDS / env.dt)))
-    hold_steps = max(1, int(round(HOLD_SECONDS / env.dt)))
+    seg_steps = max(1, int(round(args.seg_seconds / env.dt)))
+    hold_steps = max(1, int(round(args.hold_seconds / env.dt)))
     print(f"control {1/env.dt:.0f} Hz, {args.waypoints} waypoints x {seg_steps} steps "
           f"+ {hold_steps} hold, {args.waypoints * env.nu} search dimensions, "
           f"pop {args.pop}, exam level {task._exam_level}", flush=True)  # noqa: SLF001
@@ -243,7 +276,8 @@ def main() -> int:
             cand[1] = best_params             # and never lose the incumbent
             score, final, peak, stand, _, _ = rollout(
                 env, cand, seg_steps, hold_steps,
-                speed_ok=args.speed_ok, w_rush=args.w_rush)
+                speed_ok=args.speed_ok, w_rush=args.w_rush,
+                by_height=args.by_height)
             order = np.argsort(-score)[:k]
             elite = cand[order]
             mu = (w * elite).sum(0)
@@ -281,14 +315,16 @@ def main() -> int:
         # A file that silently borrows the caller's current constants is the same class of
         # instrument error this project has paid for four times.
         np.savez(param_path, params=best_params, start_q=task.start_q,
-                 seg_seconds=SEG_SECONDS, hold_seconds=HOLD_SECONDS,
-                 speed_ok=args.speed_ok, w_rush=args.w_rush)
+                 seg_seconds=args.seg_seconds, hold_seconds=args.hold_seconds,
+                 speed_ok=args.speed_ok, w_rush=args.w_rush,
+                by_height=args.by_height)
         # Replay the best candidate to record it. Deterministic: fixed start, no domain
         # randomisation, no pushes, so this reproduces the scoring rollout exactly.
         replay = np.tile(best_params[None], (args.pop, 1, 1))
         _s, final, peak, stand, fq, fv = rollout(
             env, replay, seg_steps, hold_steps, record=True,
-            speed_ok=args.speed_ok, w_rush=args.w_rush)
+            speed_ok=args.speed_ok, w_rush=args.w_rush,
+            by_height=args.by_height)
         z, sf = float(final[0]), float(stand[0])
         best_by_family[family] = (z, sf)
         keep = sf >= args.min_stand_frac
@@ -317,11 +353,15 @@ def main() -> int:
                   f"blocked on 'not ballistic' is an explosive kip-up that should be "
                   f"penalised, not admitted.")
         else:
-            print("\nNO FEASIBLE GET-UP FOUND, and nothing came close: under these servos and "
-                  "this action range a direct search over open-loop servo trajectories did "
-                  "not lift this body off the floor. A closed-loop policy may still succeed "
-                  "where an open-loop schedule cannot, but no reference clip can be handed to "
-                  "it, and any reward that assumes one is assuming something unproven.")
+            mode = "height-indexed (closed-loop)" if args.by_height else "time-indexed (open-loop)"
+            print(f"\nNO FEASIBLE GET-UP FOUND, and nothing came close: a {mode} search over "
+                  f"servo trajectories did not lift this body off the floor here. Note what "
+                  f"this does and does not establish. It is a statement about THIS solution "
+                  f"class at THIS rise budget ({args.seg_seconds * args.waypoints:.1f} s), not "
+                  f"about the body: a 3.75 s open-loop rise from the same pose reaches pelvis "
+                  f"0.875 with the standing predicate true for 66% of the hold. Before "
+                  f"concluding anything about the humanoid, vary the budget and the "
+                  f"parameterisation, because those are what have moved this number so far.")
         return 1
 
     off = 0

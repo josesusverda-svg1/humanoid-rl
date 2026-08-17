@@ -390,6 +390,12 @@ class PPO:
                     )
 
                 self.optimizer.zero_grad(set_to_none=True)
+                # Second line of defence behind the reward containment in train.py. A single
+                # non-finite loss backpropagates NaN into every parameter, and Adam then
+                # keeps them NaN forever regardless of what arrives afterwards. Skipping the
+                # minibatch costs one gradient step; taking it costs the run.
+                if not torch.isfinite(loss):
+                    continue
                 loss.backward()
                 grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.max_grad_norm)
                 self.optimizer.step()

@@ -62,6 +62,8 @@ def main() -> int:
     ap.add_argument("--params", type=Path, default=None)
     ap.add_argument("--out", type=Path, default=Path("/tmp/getup_search.png"))
     ap.add_argument("--shots", type=int, default=9)
+    ap.add_argument("--hold-seconds", type=float, default=None,
+                    help="override the saved hold, to watch a transient decay past it")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -73,6 +75,10 @@ def main() -> int:
     # at 0.085 where the search recorded 0.875.
     seg_seconds = float(d["seg_seconds"])
     hold_seconds = float(d["hold_seconds"])
+    # Overriding the hold is safe in a way that overriding the RAMP is not: the ramp is the
+    # trajectory being reproduced, while the hold is only how long we watch what it produced.
+    if args.hold_seconds is not None:
+        hold_seconds = args.hold_seconds
     cfg = Config.load(REPO_ROOT / "configs" / "getup.yaml")
     g = cfg.getup
 
