@@ -136,6 +136,35 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- supersed
 
 Newest first. `E##  date  what changed`.
 
+### E55  2026-08-18  PRE-REGISTERED BEFORE LAUNCH: rough ground, warm-started
+
+**Run**: `configs/terrain.yaml`, warm-started from `runs/final-s1-20260817-112115/checkpoints/best.pt` (E54's policy). ONE change against `configs/final.yaml`: the ground. No reward weight, sigma, threshold or observation moves. Terrain is a change to the WORLD, which is why it is readable at all.
+
+Field: one static band-limited heightfield, 80 m at a 0.10 m cell, 5.25 cm peak-to-peak, baked before the model pool is copied and never mutated. 0 oracle contradictions, 13 ok. 17-check preflight passed. See E-terrain notes in `humanoid_rl/terrain/field.py`.
+
+**THE ZERO-SHOT BASELINE, measured before launch and the thing every prediction is stated against.** E54's policy, deterministic, held 1.0 m/s command, 64 envs, 600 steps:
+
+| ground | falls | steps survived |
+|---|---|---|
+| flat (control) | **0.0%** | 600 of 600 |
+| rough 5.25 cm | **7.8%** | 588 of 600 |
+
+That is the ideal warm-start condition: the terrain bites but does not destroy, so the policy starts on-distribution and has something to learn. It also means **the run has to beat 7.8%, not 100%** -- a run that ends at 5% has done almost nothing, and stating that now prevents reading a small improvement as a success.
+
+**Pre-registered, with a reachability argument on each, because E51 shipped three bars no correct policy could have met:**
+
+1. **PRIMARY: deterministic falls on rough <= 3.0%** at a held 1.0 m/s command, measured exactly as the baseline above. *Reachable*: the same policy already achieves 0.0% on flat and 7.8% on rough with no training at all, so the gap to close is 7.8 points on a task it nearly solves. Not trivially met: it must more than halve.
+2. **The flat ability is NOT traded away.** `eval_flat/fall_rate` at the end <= its own value at iteration 100 plus 0.10. *Reachable*: the dual-eval env exists precisely to measure this, and the policy begins at 0.0% flat. Fires if the run buys rough-ground survival by forgetting flat ground -- which is the cheapest way to satisfy prediction 1.
+3. **The terrain is actually experienced.** `ground_z` spread across spawns > 4.0 cm. *Reachable*: measured 4.82 cm in preflight. This is a GUARD, not a test -- it fails only if terrain silently stops reaching the envs, which is the failure mode `field.py` was built to make impossible.
+4. **Speed is not paid for survival.** Mean speed on rough at the end >= 90% of the same policy's flat speed at the same command. *Reachable*: unknown margin, and stated as the honest weak bar of the four -- I have not measured rough-ground speed for the warm-start policy, only its fall rate. If it fails I cannot separate "terrain costs speed" from "the bar was wrong", and that is a defect in this prediction rather than in the run.
+5. **Nothing is claimed about human-likeness from this run.** Step rate, stance width and the gait score are measured on flat ground and their bands are defined against level walking; E53 already found the scorer reading the wrong checkpoint, and E54 found the better-walking policy scoring lower. Terrain numbers do not get compared to those bands.
+
+**Kill criteria**, thresholds in env steps:
+- **K1, at 100 M**: `eval/fall_rate` on rough > 0.60. The warm start begins at 0.078; a rise to 0.60 means the warm start is being destroyed rather than adapted, which is E38's failure with a different cause.
+- **K2, at 100 M**: `approx_kl` at any logged iteration > 1.0. E38 measured 24.45 on a warm start without critic warmup; `critic_warmup_updates: 30` was added to this config for exactly that, and this is the check that it worked.
+- **K3, at 500 M**: `eval_flat/fall_rate` > 0.30 while `eval/fall_rate` improves. That is the trade in prediction 2 happening, and it means stop rather than continue.
+- **K4**: no mid-run config edit, and no re-tune if a prediction misses. Same rule as E50's K4/K5.
+
 ### E54  2026-08-18  SEGMENT 2 VERDICT: **WORKED**, and the seed lottery is dead
 
 **Run**: `runs/final-s1-20260817-112115`, 11,393 iterations, 2.80 B env steps, 14.9 h. Byte-identical to segment 1 but for `run.name` and `run.seed`, verified by diff before launch. Full budget, no kill criterion fired.

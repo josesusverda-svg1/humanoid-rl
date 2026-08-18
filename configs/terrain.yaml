@@ -25,7 +25,7 @@
 # portable to other Apple Silicon machines without edits.
 
 run:
-  name: terrain-s0
+  name: terrain-warm
   # E22b: two runs with byte-identical configs and `seed: 0` in BOTH diverged at iteration
   # 3 (grad_norm 268.07 vs 289.49) into a 7.6x outcome gap, 322.9 against 2455.0 mean
   # return. E31 retracted that finding on a get-up pair that WAS reproducible, but the
@@ -185,6 +185,15 @@ ppo:
 
   # The learning rate is driven by measured KL divergence rather than a fixed schedule,
   # which is far more robust across changing reward scales.
+  # 30 critic-only updates before the actor moves. REQUIRED here, and it was absent.
+  # --init-from loads POLICY WEIGHTS ONLY with a fresh optimiser (train.py:876), so the value
+  # function arrives untrained against a world that just changed under it. E38 measured the
+  # failure this prevents: approx_kl 24.45 at iteration 1 on a warm start, which slams the
+  # adaptive learning rate to its floor and wastes the opening of the run. Terrain makes it
+  # strictly worse than E38's case, because the reward is unchanged but the STATE
+  # DISTRIBUTION is not -- the critic's predictions are stale for a reason it cannot see.
+  # ppo.py:429 also holds the LR controller off until warmup finishes, so the two interact.
+  critic_warmup_updates: 30
   adaptive_lr: true
   desired_kl: 0.01
   lr_min: 1.0e-5
