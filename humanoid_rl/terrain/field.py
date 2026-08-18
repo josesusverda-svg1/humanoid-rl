@@ -75,7 +75,9 @@ class TerrainConfig:
     #: would read as an ordinary fall -- hence the Oracle invariant rather than a comment.
     half_extent: float = 40.0
 
-    #: Peak-to-peak relief in metres over the spawn square.
+    #: Nominal peak-to-peak relief in metres, BEFORE the spatial envelope below. The field is
+    #: rescaled so its global peak-to-peak equals this, so with heterogeneity on this is the
+    #: relief of the ROUGHEST patch, and typical ground is a fraction of it.
     #:
     #: Chosen against the gait clock's own tolerance rather than picked. The reward's
     #: `gait_phase` term is 27.8% of the budget and has a `stance_transition_width` of 0.07
@@ -109,6 +111,24 @@ class TerrainConfig:
     #: Spawn square half-width. See `half_extent` for the margin arithmetic.
     spawn_half_extent: float = 12.0
 
+    #: Spatial HETEROGENEITY. Without this the field is statistically homogeneous -- one
+    #: amplitude everywhere -- so every spawn sees the same difficulty and an episode that
+    #: travels 24 m never meets ground different from where it started. Real ground is not
+    #: like that, and neither is a useful training field.
+    #:
+    #: A slow envelope multiplies the fine relief, so the field runs from nearly flat to
+    #: `envelope_max` x the nominal amplitude. `envelope_correlation` is the size of a patch:
+    #: at 10 m an episode crossing ~24 m passes through two or three distinct regimes, which
+    #: is what makes the flat->rough TRANSITIONS part of the task rather than an artefact of
+    #: where the episode happened to start.
+    #:
+    #: This is deliberately NOT a curriculum. A spatial difficulty ladder would need the spawn
+    #: location to label what the episode experiences, and it cannot: the episode leaves.
+    #: Heterogeneity wants exactly the property that defeats a spatial curriculum.
+    envelope_correlation: float = 10.0
+    envelope_min: float = 0.06
+    envelope_max: float = 1.45
+
     seed: int = 0
 
     def rows(self) -> int:
@@ -136,20 +156,66 @@ def generate(cfg: TerrainConfig) -> np.ndarray:
         field /= std
     np.clip(field, -cfg.clip_sigma, cfg.clip_sigma, out=field)
 
-    # The flat disc is applied BEFORE the peak-to-peak rescale, so the configured amplitude
-    # describes the terrain the humanoid actually walks on rather than being diluted by a
-    # flat region whose size is a separate decision.
-    axis = np.linspace(-cfg.half_extent, cfg.half_extent, n)
-    xx, yy = np.meshgrid(axis, axis)          # xx varies along columns, yy along rows
-    r = np.hypot(xx, yy)
+    # ORDER MATTERS, and getting it wrong made the field FLATTER rather than more varied.
+    # The fine relief is scaled to the target amplitude HERE, before the envelope. Scaling
+    # afterwards normalises the whole field to whatever its roughest patch happens to be, so
+    # every other patch is divided down: measured, that gave a local peak-to-peak of 0-3.7 cm
+    # on a field nominally set to 14 cm, i.e. gentler everywhere than the uniform 5.25 cm
+    # field it replaced.
+    span0 = float(field.max() - field.min())
+    if span0 > 0.0:
+        field *= cfg.amplitude_p2p / span0
+
+    # The slow envelope, mapped through its OWN QUANTILES so the DISTRIBUTION of difficulty
+    # is set directly rather than emerging from the shape of a Gaussian.
+    #
+    # Two earlier attempts failed and both failed the same way -- by controlling a number
+    # instead of a distribution, and measuring the wrong quantity to check:
+    #
+    #  1. envelope applied AFTER the global rescale: normalised the field to its roughest
+    #     patch and divided every other patch down. Result: local relief 0-3.7 cm on a field
+    #     set to 14 cm, gentler everywhere than the uniform 5.25 cm field it replaced.
+    #  2. envelope squared and normalised over the whole 40 m field: with a 10 m patch size
+    #     there are only ~16 independent patches, so the top of the range is reached in about
+    #     one of them and the +-12 m spawn square often does not contain it. Measured
+    #     stride-to-stride change spanned only 1.24-1.90 cm, equivalent to a homogeneous
+    #     4-6 cm field, against the 1.62 cm of the 5.25 cm field it was meant to exceed.
+    #
+    # Rank mapping fixes both: every quantile of the envelope is present by construction, so
+    # "a quarter of the field is near flat and a quarter is very rough" is true by definition
+    # rather than by luck of the draw.
+    if cfg.envelope_max > cfg.envelope_min:
+        env_raw = np.random.default_rng(cfg.seed + 9721).standard_normal((n, n))
+        env = _box_smooth(env_raw, max(1, int(round(cfg.envelope_correlation / cfg.cell))))
+        # Rank -> uniform [0,1], over the SPAWN SQUARE rather than the whole field, because
+        # that is the region episodes actually start in and the region the distribution is
+        # being specified for.
+        s = int(round(cfg.spawn_half_extent / cfg.cell))
+        mid = n // 2
+        ref = env[max(mid - s, 0):mid + s, max(mid - s, 0):mid + s].ravel()
+        u = np.searchsorted(np.sort(ref), env) / max(ref.size, 1)
+        u = np.clip(u, 0.0, 1.0)
+        field *= cfg.envelope_min + (cfg.envelope_max - cfg.envelope_min) * u
+
+    # The flat disc at the origin, applied LAST so no later step can reintroduce relief there.
+    # It exists for exactly one reason: `_compute_standing_height` and `_verify_pd_holds_pose`
+    # both run the humanoid at x = y = 0, and this is what makes `prepare()` bit-identical to
+    # a plane run.
+    #
+    # It was silently DROPPED when the envelope was added -- the edit replaced the block that
+    # applied it -- and the field then passed at half_extent 20 by luck (the envelope happened
+    # to be low near the origin) and failed at 40. The zero-contact assertion added to
+    # `prepare()` in E53 is what caught it: "the nominal pose starts in contact (20 contacts)".
+    # That guard was written for a different reason and paid for itself here.
     if cfg.flat_disc_radius > 0.0:
-        # Smooth over one correlation length so the disc edge is not itself an obstacle.
-        blend = np.clip((r - cfg.flat_disc_radius) / max(cfg.correlation_long, 1e-6), 0.0, 1.0)
+        axis = np.linspace(-cfg.half_extent, cfg.half_extent, n)
+        xx, yy = np.meshgrid(axis, axis)
+        blend = np.clip((np.hypot(xx, yy) - cfg.flat_disc_radius)
+                        / max(cfg.correlation_long, 1e-6), 0.0, 1.0)
         field *= blend * blend * (3.0 - 2.0 * blend)      # smoothstep
 
-    span = float(field.max() - field.min())
-    if span > 0.0:
-        field *= cfg.amplitude_p2p / span
+    # No global rescale here: `amplitude_p2p` is now the relief of an envelope-1.0 patch, and
+    # the field is deliberately allowed to exceed it where the envelope peaks.
     return np.ascontiguousarray(field - field.min(), dtype=np.float32)
 
 

@@ -126,14 +126,42 @@ def main() -> int:
           abs(p2p - tcfg.amplitude_p2p) < 0.2 * tcfg.amplitude_p2p,
           f"measured p2p {p2p * 100:.2f} cm over the spawn square vs configured "
           f"{tcfg.amplitude_p2p * 100:.2f} cm")
-    # Stride-to-stride change is what the gait clock actually experiences.
+    # Stride-to-stride change, BY PATCH, because the field is deliberately heterogeneous.
+    #
+    # The check this replaces required a single p95 under 3.5 cm, derived from the gait-clock
+    # ceiling that E57 refuted by measurement (gait_phase falls only 13.6% at nearly 3x that
+    # ceiling, and what rough ground actually costs is speed). It also could not express the
+    # thing the field now exists to have: VARIATION. A uniform ceiling passes a field that is
+    # the same everywhere, which is the failure E57 was fixing.
     stride = 0.30
-    th = rng.uniform(-np.pi, np.pi, P)
-    dz = np.abs(tf.height_at(px + stride * np.cos(th), py + stride * np.sin(th)) - hs)
-    check("stride-to-stride change is inside the gait clock's tolerance",
-          np.percentile(dz, 95) < 0.035,
-          f"p95 {np.percentile(dz, 95) * 100:.2f} cm over a {stride:.2f} m stride "
-          f"(7.0 cm p2p is the measured ceiling where terrain, not policy, loses the clock)")
+    patches = [(a, b) for a in np.linspace(-S * 0.9, S * 0.9, 9)
+               for b in np.linspace(-S * 0.9, S * 0.9, 9)]
+    dz_patch = []
+    for cx, cy in patches:
+        x = cx + rng.uniform(-1.2, 1.2, 200)
+        y = cy + rng.uniform(-1.2, 1.2, 200)
+        th = rng.uniform(-np.pi, np.pi, 200)
+        h0 = tf.height_at(x, y)
+        h1 = tf.height_at(x + stride * np.cos(th), y + stride * np.sin(th))
+        dz_patch.append(float(np.percentile(np.abs(h1 - h0), 95)))
+    dz_patch = np.array(dz_patch) * 100.0
+    lo, hi = float(np.percentile(dz_patch, 5)), float(np.percentile(dz_patch, 95))
+    check("the field contains genuinely FLAT ground",
+          lo < 2.0,
+          f"5th-percentile patch changes {lo:.2f} cm per 0.30 m step "
+          f"(the uniform 5.25 cm field measured 1.62 cm everywhere)")
+    check("the field contains genuinely ROUGH ground",
+          hi > 4.0,
+          f"95th-percentile patch changes {hi:.2f} cm "
+          f"(the uniform 14 cm field measured 4.33 cm, at 35.9% zero-shot falls)")
+    check("the roughest ground is inside what has been measured",
+          float(dz_patch.max()) < 8.0,
+          f"worst patch {dz_patch.max():.2f} cm; the 20 cm homogeneous field measured 6.19 cm "
+          f"at 64.1% zero-shot falls, and nothing rougher has ever been measured here")
+    check("difficulty actually varies across the field",
+          hi / max(lo, 1e-6) > 2.5,
+          f"roughest/flattest ratio {hi / max(lo, 1e-6):.1f}x -- an episode travels ~24 m and "
+          f"must cross regimes, not sit in one")
 
     # --- the spawn rule, which is the load-bearing change ------------------------------
     env = ThreadedVecEnv(str(model_path), LocomotionTask(), args.envs, num_workers=4,

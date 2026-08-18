@@ -136,6 +136,79 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- supersed
 
 Newest first. `E##  date  what changed`.
 
+### E58  2026-08-18  The field was uniform. It is now heterogeneous, after two failed attempts
+
+**"So it'll be very rough at some area, then it will be kind of flat another area. So every
+time is random and complex."** The field E57 built was statistically HOMOGENEOUS: one
+amplitude everywhere, so every spawn met the same difficulty and an episode travelling 24 m
+never encountered ground different from where it started.
+
+**This also retires an argument I made two days ago.** The terrain design rejected spatial
+difficulty variation on the grounds that "episodes travel further than any spatial band this
+field can afford to carry, so the spawn level stops describing the episode within seconds."
+That is a valid objection to a spatial CURRICULUM, where the spawn location must label what
+the episode experiences. It is not an objection to HETEROGENEITY, which wants exactly that
+property: crossing from flat to rough inside one episode is the thing being trained.
+
+**Two attempts failed before one worked, and both failed the same way -- by controlling a
+number instead of a distribution.**
+
+1. **Envelope applied after the global rescale.** Normalising the field to its roughest patch
+   divides every other patch down. Measured: local relief 0-3.7 cm on a field configured at
+   14 cm -- gentler everywhere than the uniform 5.25 cm field it was replacing.
+2. **Envelope squared and normalised over the whole 40 m field.** With a 10 m patch size there
+   are only ~16 independent patches, so the top of the range is reached in about one of them
+   and the +-12 m spawn square often does not contain it. Measured stride-to-stride change
+   spanned 1.24-1.90 cm across 121 patches: the entire field equivalent to a homogeneous
+   4-6 cm one, against the 1.62 cm of the 5.25 cm field it was meant to exceed.
+
+Both were caught only because the check was **stride-to-stride ground change**, the quantity a
+foot actually experiences, rather than peak-to-peak relief in a window, which mixes gentle
+hills with real roughness and reported the second attempt as fine.
+
+**What works: rank mapping.** The envelope is mapped through its own quantiles, computed over
+the spawn square, so every quantile is present by construction and "a quarter of the field is
+near flat" is true by definition rather than by luck of the draw. Measured, 81 patches:
+
+| | stride change per 0.30 m step |
+|---|---|
+| flattest 5% of patches | **0.95 cm** |
+| median | 3.7 cm |
+| roughest 5% | **6.12 cm** |
+| worst patch | 7.18 cm |
+| ratio across the field | **6.5x** |
+
+For scale, on homogeneous fields: 5.25 cm -> 1.62 cm (6.2% zero-shot falls), 14 cm -> 4.33 cm
+(35.9%), 20 cm -> 6.19 cm (64.1%). So this one field spans from easier than the field that was
+"not so rough" to as hard as the hardest ever measured here.
+
+**A REGRESSION I INTRODUCED, caught by a guard written for something else.** The envelope edit
+silently deleted the flat disc at the origin -- the edit replaced the block that applied it.
+The field then PASSED at `half_extent` 20 by luck (the envelope happened to be low near the
+origin) and FAILED at 40. What caught it was the zero-contact assertion added to `prepare()`
+in E53: *"the nominal pose starts in contact (20 contacts) at root height 0.8789"*. That guard
+was written because `model_prep`'s sag check was one-sided, for reasons having nothing to do
+with terrain generation, and it paid for itself here. The disc is now applied LAST, so no
+later step can reintroduce relief at the origin.
+
+**And the preflight was still enforcing the model E57 refuted.** I rewrote the Oracle
+invariant against the measurements and left the paired check in `preflight_terrain.py`
+untouched, so it failed the corrected field on a 3.5 cm ceiling derived from the gait-clock
+argument. Rebuilt on the same basis, and it now checks the thing that actually matters:
+the field must contain genuinely flat ground, genuinely rough ground, a roughest patch inside
+what has ever been measured, and a flat-to-rough ratio above 2.5x. A uniform ceiling passes a
+uniform field, which is the failure being fixed.
+
+**Revised zero-shot baseline**, E54's walker, deterministic, 1.0 m/s, 128 envs:
+
+| field | falls | spawn ground_z spread |
+|---|---|---|
+| flat control | 1.6% | 0.0 cm |
+| heterogeneous | **31.2%** | 14.3 cm |
+
+E57's predictions carry over with the primary bar restated against 31.2%: **deterministic
+falls on rough <= 12%** at a held 1.0 m/s command. The other four are unchanged.
+
 ### E57  2026-08-18  The terrain was too flat, and the argument that chose it was wrong
 
 **"It's not so rough, the terrain."** That was the whole prompt, and it was right.
