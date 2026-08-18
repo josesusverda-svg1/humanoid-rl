@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ZERO_SHOT_ROUGH = 0.359      # E57: re-measured on the 14 cm field (was 0.078 at 5.25 cm)
+ZERO_SHOT_ROUGH = 0.312      # E57: re-measured on the 14 cm field (was 0.078 at 5.25 cm)
 ZERO_SHOT_FLAT = 0.000
 
 
