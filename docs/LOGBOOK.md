@@ -136,6 +136,48 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- supersed
 
 Newest first. `E##  date  what changed`.
 
+### E56  2026-08-18  E55 KILLED at iteration 45. `critic_warmup_updates` CAUSED the failure it exists to prevent
+
+**K2 fired within four minutes of launch and the run was stopped, as pre-registered.** `approx_kl` reached **300.97**, against K2's threshold of 1.0 and against the 24.45 that E38 recorded as the warm-start disaster this very setting was added to fix.
+
+**The trace is unambiguous:**
+
+| iter | approx_kl | warmup | lr | ep length | value_loss |
+|---|---|---|---|---|---|
+| 1-30 | **0.0000** | on | 1.00e-03 | 0 -> **1492** | ~1200 |
+| **31** | **300.97** | **off** | 1.32e-04 | 1516 | 1105 |
+| 32 | 0.101 | off | 1.73e-05 | 1587 | **31969** |
+| 34 | 0.017 | off | 1.73e-05 | **298** | 21406 |
+| 39 | 0.008 | off | 1.73e-05 | **138** | 19029 |
+
+Through the whole warmup the policy was healthy and improving -- episode length climbed 0 to 1492, return to 4400. It was destroyed in the **single update** where the actor was first allowed to move, and it never recovered.
+
+**The mechanism, exactly.** `ppo.py:429` reads
+
+```python
+if cfg.adaptive_lr and self._updates_done >= cfg.critic_warmup_updates:
+    self._adapt_learning_rate(...)
+```
+
+so the learning-rate controller is **disabled for the whole warmup**. The LR therefore sits at its initial `1.0e-3` for 30 updates while the actor is frozen, and at iteration 31 the actor takes its **first** step at a rate the controller has never had a chance to calibrate -- through 5 epochs x 10 minibatches, 50 gradient steps. The controller then engages and slams the LR to 1.3e-4 and 1.7e-5, one update too late.
+
+**Why the same LR is harmless cold and fatal warm.** Measured on this exact config:
+
+| start | policy at first actor update | approx_kl at lr 1.0e-3 |
+|---|---|---|
+| cold | random | **0.0855** |
+| warm | E54's walker | **300.97** |
+
+**3,520x on the same learning rate.** A random policy has small, incoherent advantages, so a large step barely moves the distribution and the controller has time to adapt down. A good policy has large, coherent advantages, so the same step moves it enormously. The learning rate is not a property of the optimiser here; it is a property of the optimiser AND the policy it starts from, and nothing in the config expresses that.
+
+**This is the sharpest instance yet of a pattern that now has four entries.** E38 measured a warm-start blow-up and added `critic_warmup_updates` as the remedy. I copied that remedy into a warm-started run, wrote a comment explaining that it was REQUIRED here, and pre-registered a gate against E38's own number -- and the remedy produced a blow-up **12x larger than the one it was named after**. The warmup did not fail to help; it is the direct cause, because freezing the actor is exactly what denies the LR controller the measurements it needs before the actor moves.
+
+The general form, and it is the same shape as E52's check and E51's bars: **a remedy written against a failure's symptom can create that failure through a different route, and a gate written against the old number will not tell you which route you are on.** K2 caught this only because it was written as an absolute ceiling on `approx_kl` checked every poll, rather than as a comparison against E38's 24.45 at a step milestone. Had it been written the second way -- which was my first instinct -- it would have fired at 100 M env steps, forty minutes after the policy was already dead.
+
+**What is NOT damaged.** The source policy `runs/final-s1-20260817-112115/checkpoints/best.pt` is untouched; the terrain run wrote no `best.pt` at all (eval interval 100, died at 45). The terrain itself is not implicated: the field, the spawn rule, the world-z fixes and the dual eval all behaved, and the zero-shot measurement that a warm policy takes 7.8% falls on this ground still stands.
+
+**Not relaunched.** K4 forbids a reflex re-tune, and the obvious fix (start at `lr_min` and let the measured-KL controller climb) is a hypothesis about a 15-hour run that costs about two minutes to test. Tested first, then launched.
+
 ### E55  2026-08-18  PRE-REGISTERED BEFORE LAUNCH: rough ground, warm-started
 
 **Run**: `configs/terrain.yaml`, warm-started from `runs/final-s1-20260817-112115/checkpoints/best.pt` (E54's policy). ONE change against `configs/final.yaml`: the ground. No reward weight, sigma, threshold or observation moves. Terrain is a change to the WORLD, which is why it is readable at all.
