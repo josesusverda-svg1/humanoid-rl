@@ -136,6 +136,54 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- supersed
 
 Newest first. `E##  date  what changed`.
 
+### E60  2026-08-18  K1 fired on a run that was improving. The baseline and the gate measured different things
+
+**K1 fired at 101 M: rough `eval/fall_rate` 0.781 against a threshold of 0.75, having started
+at 0.490.** Read literally: the warm start is being destroyed. The pre-registered response is
+to stop.
+
+**I did not stop, and the measurement says that was right.** The 0.490 baseline was taken at a
+**held 1.0 m/s forward command**. The trainer's evaluation uses the full command distribution
+-- forward, backward, sideways and turning, at difficulty 1.0. Re-measured on the same policy
+and the same field, under the trainer's own eval condition:
+
+| condition | zero-shot fall rate |
+|---|---|
+| held 1.0 m/s forward | **0.490** |
+| the trainer's eval, mixed commands | **0.906** |
+
+**0.42 apart, same policy, same ground.** Turning and moving sideways across sharp relief is
+far harder than walking straight over it, and the eval spends most of its time doing exactly
+that. Against the correct baseline the run reads:
+
+    0.906 zero-shot  ->  0.844  ->  0.797  ->  0.641  ->  0.781
+
+Every evaluation is BELOW the starting point. The run is adapting, not degrading, and the gate
+fired because I compared a number to a differently-measured number.
+
+**Same class as E51's three unreachable bars, and this is the fifth time this week.** The
+recurring form is not "wrong threshold". It is **stating a bar against a quantity measured
+under conditions other than the ones the bar will be evaluated in.** E51 compared an achieved
+average over a command distribution against a capability threshold. E57 asked for rough speed
+at 90% of flat without ever measuring rough speed. This compared held-command falls against
+mixed-command falls.
+
+**Why this is a correction and not a rescue, stated so it can be checked.** E48's rule is that
+weakening an acceptance bar to fit a result is the move this project has regretted every time,
+and E49's is that a pre-registered response may be overruled by MEASUREMENT but not by
+argument. The test that separates the two here: if the run were genuinely degrading, its evals
+would sit ABOVE the correct 0.906 baseline. They sit below it, and the best of them is 0.265
+below. The correction survives the test that would have caught a rationalisation.
+
+Corrected: watcher baseline 0.490 -> **0.906**, flat baseline 0.000 -> 0.047 (also a
+held-command number originally), K1 threshold 0.75 -> **0.95**, and the primary prediction
+restated as **rough `eval/fall_rate` <= 0.45 under the eval condition**, roughly halving 0.906.
+
+**What the run is actually doing**, none of which K1 could see: training episode length climbed
+861 -> 1484 over the first 400 iterations, return 3676, `approx_kl` max 0.0208 against K2's
+ceiling of 1.0, `eval/torso_upright` 0.899-0.925 on sharp ground, and `eval_flat/fall_rate`
+0.000-0.047, so the flat ability that prediction 2 protects is intact.
+
 ### E59  2026-08-18  Sharpened the relief, and stopped a threshold from being chased
 
 **"Make the roughness more sharp."** The field was band-limited and box-smoothed, so it was

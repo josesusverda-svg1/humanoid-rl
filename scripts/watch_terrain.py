@@ -19,8 +19,16 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ZERO_SHOT_ROUGH = 0.490      # E57: re-measured on the 14 cm field (was 0.078 at 5.25 cm)
-ZERO_SHOT_FLAT = 0.000
+# E60: measured under the TRAINER'S OWN EVAL CONDITION (mixed commands, 64 envs), not at a
+# held 1.0 m/s. The two differ by 0.42 on the same policy and the same field, because turning
+# and sideways commands on sharp ground are far harder than walking straight. K1 was set
+# against the held-command number and fired on a run that was improving.
+# E60: measured under the TRAINER'S OWN EVAL CONDITION (mixed commands, 64 envs), not at a
+# held 1.0 m/s command. The two differ by 0.42 on the same policy and the same field, because
+# turning and sideways commands on sharp ground are far harder than walking straight. K1 was
+# set against the held-command number and fired on a run that was improving.
+ZERO_SHOT_ROUGH = 0.906
+ZERO_SHOT_FLAT = 0.047
 
 
 def rows(p: Path) -> list[dict]:
@@ -71,8 +79,8 @@ def main() -> int:
             if steps >= 100e6 and "K1" not in fired and ev:
                 fired.add("K1")
                 fr = ev[-1]["eval/fall_rate"]
-                print(f"K1 {'FIRED' if fr > 0.75 else 'passed'}: rough fall_rate {fr:.3f} "
-                      f"vs 0.75 at {steps/1e6:.0f}M (started at {ZERO_SHOT_ROUGH:.3f})",
+                print(f"K1 {'FIRED' if fr > 0.95 else 'passed'}: rough fall_rate {fr:.3f} "
+                      f"vs 0.95 at {steps/1e6:.0f}M (started at {ZERO_SHOT_ROUGH:.3f})",
                       flush=True)
                 print(f"     also: approx_kl max so far {kl:.4f} -- K2 wants it under 1.0",
                       flush=True)
