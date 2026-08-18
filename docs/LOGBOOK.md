@@ -71,9 +71,25 @@ lists what it invalidated.
 
 ## Current state
 
-Best policy: `runs/final-s0-20260816-201017/checkpoints/best.pt` (E51). The previous holder,
-`runs/envelope-20260814-100402` iteration 3100, is kept below as the baseline every E51 number
-is quoted against.
+Best policy: `runs/final-s1-20260817-112115/checkpoints/best.pt`, iteration 9500 (E54).
+
+| Metric | **seed 1** | seed 0 | envelope best.pt | Condition |
+|---|---|---|---|---|
+| speed | **1.06** | 0.851 | 0.694 | held 1.0 m/s command |
+| torso_upright | **0.909** | 0.803 | 0.658 | held 1.0 m/s command |
+| torso tilt | **24.7 deg BACK** | 36.6 BACK | 48.9 BACK | held 1.0 m/s command |
+| worst tracking ratio | **0.93** | 0.85 | 0.69 (fails) | amp_readiness sweep |
+| deterministic falls | **0%** | 0% | fails gate | 1.0 m/s, 1200 steps |
+| step rate | 2.75/s | **1.94/s** | - | human 1.6-2.0, seed 1 is OUT of band |
+| human-likeness | 26% | **29%** | 21% | best.pt's own eval row |
+
+Note the last two rows: seed 1 walks faster and stands straighter, and scores LOWER on
+human-likeness, because it takes short quick steps (stride 0.39 m against 0.47). Which of
+those two facts is the instrument's fault is not established. Do not quote one number from
+this table beside another run's condition -- that mistake has been made twice here (E23, E53).
+
+The previous holder, `runs/envelope-20260814-100402` iteration 3100, is kept below as the
+baseline the E51 and E54 numbers are quoted against.
 
 | Metric | final-s0 | envelope best.pt | Condition | Human |
 |---|---|---|---|---|
@@ -119,6 +135,64 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- supersed
 ## Entries
 
 Newest first. `E##  date  what changed`.
+
+### E54  2026-08-18  SEGMENT 2 VERDICT: **WORKED**, and the seed lottery is dead
+
+**Run**: `runs/final-s1-20260817-112115`, 11,393 iterations, 2.80 B env steps, 14.9 h. Byte-identical to segment 1 but for `run.name` and `run.seed`, verified by diff before launch. Full budget, no kill criterion fired.
+
+| # | Prediction | seed 0 | seed 1 |
+|---|---|---|---|
+| 1 | `action_std` <= 0.501 | PASS | **PASS** |
+| 2 | slope >= -0.10/1B AND last >= first | FAIL | **FAIL** (slope -0.015 pass, endpoints 0.888 -> 0.835 fail) |
+| 3 | upright>=0.85 AND falls<=0.15 AND speed>=0.75 | FAIL | **PASS, 3 evals** |
+| 4 | speed >= 0.85 AND ratio >= 0.80 | FAIL | **FAIL** on speed 0.773, **ratio 1.101** |
+| 5 | gait_score >= 0.40 | FAIL 0.342 | FAIL 0.276 |
+| 6 | amp_readiness gates 1-3 | PASS | **PASS**, worst ratio 0.93 vs 0.85 |
+| 7 | torso tilt < 30 deg | FAIL 36.6 | **PASS, 24.7 deg** |
+| 8 | seed spread < 3.0x | - | **PASS, 1.023x** |
+
+**5 of 8 against segment 1's 2 of 7. Verdict WORKED.**
+
+**P7 was called "the boldest and least-supported prediction" in E50 and it passed.** Torso tilt 48.87 deg backward on the old `best.pt`, 36.6 on seed 0, **24.7 on seed 1** -- and `torso_upright` at a held 1.0 m/s went 0.658 -> 0.803 -> **0.9085**. The lean is not fixed, but it has halved twice.
+
+**P8 KILLS THE SEED LOTTERY, AND THAT MATTERS BEYOND THIS RUN.** Mean `eval/episode_length` over the last five evals: seed 0 **2274.9**, seed 1 **2224.3**, ratio **1.023**. E22b measured **5.9x** on a byte-identical pair and that number has been used since to dismiss effects as noise, at a 7x floor. Two full 2.8 B runs differing only in the seed land within **2.3%** of each other on episode length. **Single-run A/B on this codebase is readable.** Anything dismissed under E22b's floor should be rechecked.
+
+**What seed 1 bought at a held 1.0 m/s command:**
+
+| | envelope best.pt | seed 0 | seed 1 |
+|---|---|---|---|
+| speed | 0.694 | 0.851 | **1.06** |
+| torso_upright | 0.658 | 0.803 | **0.9085** |
+| tilt | 48.9 deg BACK | 36.6 BACK | **24.7 BACK** |
+| worst tracking ratio | 0.69 (fails gate) | 0.85 | **0.93** |
+| deterministic falls | fails gate | 0% | **0%** |
+
+**P2 failed on both seeds, and E50's pre-registered fallback does NOT fire.** E50 named `gae_lambda` as the residual **if P7 failed while P2 and P3 passed**. On seed 1, P7 and P3 PASSED and P2 failed -- the opposite pattern. The conclusion does not apply and `gae_lambda` stays untested.
+
+**And I retract, in this entry, a claim I made from the middle of this run.** At 2.06 B I concluded from both seeds dipping between 1.0 B and 1.5 B that "the posture collapse is built into the reward". It is not. It is an OSCILLATION, and both seeds recover:
+
+| window | s0 | s1 |
+|---|---|---|
+| 0.50-0.75B | 0.866 | 0.947 |
+| 1.25-1.50B | 0.733 | 0.745 |
+| 1.50-1.75B | 0.765 | **0.661** |
+| 2.25-2.50B | 0.810 | **0.916** |
+
+I read a trough as a floor because my window ended in it. Third time in this logbook that I have drawn a conclusion from a window that stopped at the wrong place; the previous two were caught by a script and by an audit, this one by the run continuing.
+
+**What survives from that analysis, because it was measured rather than inferred.** Decomposing reward/step across the dip, median over 0.75-1.00 B against 1.40-1.65 B, seed-averaged:
+
+```
+bought:  lin_vel +0.116, ang_vel +0.094, orientation +0.067,
+         gait_phase +0.047, torque +0.046      = +0.370/step
+paid:    torso_upright                          -0.089/step     -> 4.2 : 1
+```
+
+`orientation` measures the PELVIS and improves while `torso_upright` measures the CHEST and falls, on both seeds. The policy folds at the waist: pelvis level, torso back. That is the failure `model_prep.py` documents as the reason the upper-body sensors exist -- *"the pelvis stayed level at the right height throughout, so every reward term was satisfied"* -- returning backward instead of forward, because the pelvis term (`w_orientation` -1.0) was never removed and outweighs the chest term (`w_torso_upright` 0.6). Two terms measure the same physical quantity at two places on the body and pull in opposite directions. That is real, it is E29's class, and it is a candidate for a future run -- but it is a detour on the way to a good policy, not a wall.
+
+**Gate 4 is now the open one.** `gait_report` on seed 1's `best.pt`: step rate **2.75/s** against a human 1.6-2.0 and against seed 0's 1.94. It walks 1.06 m/s by taking short quick steps (stride 0.39 m against seed 0's 0.47). Human-likeness 26% against seed 0's 29%: seed 1 wins Posture 47% vs 33% and loses Rhythm 45% vs 50% and Reliability 26% vs 45%. **The better-walking policy scores lower on the human-likeness metric**, and which of those two facts is the instrument's fault is not yet established.
+
+**Best policy is now `runs/final-s1-20260817-112115/checkpoints/best.pt`**, iteration 9500.
 
 ### E53  2026-08-17  Bug #11, and E52's remedy was aimed at the wrong edge
 
