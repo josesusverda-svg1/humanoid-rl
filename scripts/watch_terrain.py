@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ZERO_SHOT_ROUGH = 0.078      # measured before launch, E55's baseline
+ZERO_SHOT_ROUGH = 0.359      # E57: re-measured on the 14 cm field (was 0.078 at 5.25 cm)
 ZERO_SHOT_FLAT = 0.000
 
 
@@ -71,8 +71,8 @@ def main() -> int:
             if steps >= 100e6 and "K1" not in fired and ev:
                 fired.add("K1")
                 fr = ev[-1]["eval/fall_rate"]
-                print(f"K1 {'FIRED' if fr > 0.60 else 'passed'}: rough fall_rate {fr:.3f} "
-                      f"vs 0.60 at {steps/1e6:.0f}M (started at {ZERO_SHOT_ROUGH:.3f})",
+                print(f"K1 {'FIRED' if fr > 0.75 else 'passed'}: rough fall_rate {fr:.3f} "
+                      f"vs 0.75 at {steps/1e6:.0f}M (started at {ZERO_SHOT_ROUGH:.3f})",
                       flush=True)
                 print(f"     also: approx_kl max so far {kl:.4f} -- K2 wants it under 1.0",
                       flush=True)
@@ -89,10 +89,10 @@ def main() -> int:
             # Prediction 1, reported the first time it is met on a rough eval.
             if "P1" not in fired:
                 for e in ev:
-                    if e["eval/fall_rate"] <= 0.03:
+                    if e["eval/fall_rate"] <= 0.12:
                         fired.add("P1")
                         print(f"PREDICTION 1 MET at iter {e.get('iteration')}: rough "
-                              f"fall_rate {e['eval/fall_rate']:.3f} <= 0.030, from a "
+                              f"fall_rate {e['eval/fall_rate']:.3f} <= 0.120, from a "
                               f"zero-shot {ZERO_SHOT_ROUGH:.3f}", flush=True)
                         break
 
