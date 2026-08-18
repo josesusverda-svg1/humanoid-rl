@@ -67,6 +67,7 @@ lists what it invalidated.
 | `log_std` sat above its clamp, which passes no gradient | E05 | 610 iterations of frozen exploration | In-place clamp after optimiser step |
 | Normaliser `COUNT_MAX = 1e6` destroyed warm starts | E06 | Warm-started runs before it | Cap removed |
 | Heading command was an integrated yaw rate, so the target spun away | E07 | All heading-error numbers before it | XBot heading command |
+| **`gait_report.py` scored `evaluations[-1]` while rolling out `--checkpoint`**, so the human-likeness figure belonged to a different policy than the gait table beside it | E53 | **Every human-likeness number quoted in this project.** best.pt on final-s0 is iteration 9300 and scores **0.2948**; the last eval row is 11300 and scores 0.1970. The "20%" repeatedly quoted for the best walker is the 11300 row, which was never selected | `gait_report.py` now resolves the row from the checkpoint's own iteration |
 
 ## Current state
 
@@ -119,7 +120,92 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- supersed
 
 Newest first. `E##  date  what changed`.
 
+### E53  2026-08-17  Bug #11, and E52's remedy was aimed at the wrong edge
+
+**INSTRUMENTATION BUG #11, and it invalidates every human-likeness number this project has
+quoted.** `scripts/gait_report.py` rolled out the policy named by `--checkpoint` (default
+`best.pt`) to build its gait table, and then scored `evaluations[-1]` -- the newest metrics
+row, a different policy. Measured on `runs/final-s0-20260816-201017`:
+
+| | iteration | overall | fall_rate | heading err |
+|---|---|---|---|---|
+| what the table showed | 9300 (`best.pt`) | **0.2948** | 0.000 | 11.23 deg |
+| what the score showed | 11300 (last row) | 0.1970 | 0.141 | 17.87 deg |
+
+The best walker this project has produced scores **29%**, not the 20% quoted for it
+repeatedly over the last two days. This is E23's defect verbatim -- *"quoting it beside
+iteration 3100's return described a policy that never existed"* -- committed again, in a
+different file, by the same hand that wrote the warning at the top of this logbook. Fixed:
+`gait_report.py` now reads the checkpoint's own `iteration` and scores the matching row, and
+prints which row it scored.
+
+**E52's DIAGNOSIS STANDS. ITS IMPLIED REMEDY DOES NOT.** E52 established that the
+`feet_distance` corridor [0.20, 0.45] and the human band [0.10, 0.15] do not overlap, which
+is true and is still the finding. It then pointed at `feet_distance_min` as the lever. That
+is wrong, and the measurement says so plainly: at a held 1.0 m/s over 64 envs x 12 s the
+stance is **mean 0.399, p1 0.199, p50 0.406, p99 0.558**. The policy sits **0.20 above the
+floor** and is already paying at the ceiling in its top percentile.
+
+Lowering the floor changes the price in a region the policy never visits, so it predicts
+**NO EFFECT**. The binding edge is the CEILING. And lowering the ceiling is not a novel
+intervention: E12 introduced `feet_distance_max = 0.45` where none existed, stance fell
+0.67 -> 0.34-0.40, verdict WORKED -- the only reward change in this logbook with a positive
+verdict on its own target.
+
+I wrote E52's remedy from the shape of the corridor rather than from where the policy stands
+in it. Same error class as the check E52 itself was mocking: reasoning about an edge without
+measuring which edge is loaded.
+
+**THE FOUR "DEFECTS" WERE THE WRONG FOUR.** Decomposing the score exactly (group weights sum
+to 5.5; a band is worth `(1-score)/n_bands * group_weight / 5.5`), on best.pt's own row:
+
+| band | pp available |
+|---|---|
+| **left/right evenness (`gait_symmetry`)** | **18.18** |
+| double support | 13.64 |
+| vertical bounce | 9.09 |
+| foot slip | 7.55 |
+| torso upright | 6.06 |
+| stance width | 6.06 |
+| sideways drift | 4.55 |
+| speed tracking | 3.56 |
+| holding a heading | 1.84 |
+
+Total available 70.52 pp. **The four I named are 25.76 pp, 36.5% of it.** Symmetry alone is
+18.18 -- more than stance width and torso lean combined -- and it was not on my list at all.
+
+Three further corrections from the same audit, each measured:
+
+1. **`stride_length` is not a band in `gait_score` and is worth exactly 0.00 pp.** It is also
+   not an independent quantity: stride = speed / cadence, and cadence is already inside the
+   human band (debounced strike rate 1.995/s against 1.6-2.0). At 1.2 m/s the same cadence
+   gives 0.60-0.72 m unaided. E13 recorded this shape once already.
+2. **`double_support` is NOT caused by `stance_fraction 0.6`.** The drawn stance fraction
+   averages 0.6020, so the clock commands `2s-1 = 0.2039`, dead centre of the human band --
+   and is disobeyed asymmetrically: airborne-when-the-schedule-says-stance 0.1643 per
+   foot-step against loaded-when-it-says-swing 0.0524, a 3.1x under-contact bias. Obeying
+   pays +0.219/step against offsetting costs of order 0.01/step. This is E23's
+   optimisation-not-pricing shape, not a tuning error.
+3. **The four are not one posture.** Over a 4.1x held-speed sweep, stance width and torso
+   lean are speed-invariant (0.357-0.399 and 0.801-0.827, the latter IMPROVING with speed)
+   while double support and stride are speed-driven. Across 114 walking evals over both
+   seeds: r(torso_upright, stance_width) = -0.219, r(torso_upright, double_support) = -0.151,
+   r(stance_width, double_support) = -0.001. A shared brace predicts a wide stance WITH a
+   bent torso; the measured sign is the opposite.
+
+**And the dashboard's "Balance 0%", which I recorded yesterday as a suspected display defect,
+is not a defect.** It is the single largest scoring gap in the project, reading correctly.
+
+**Nothing launched.** The instrument was scoring the wrong policy, and a fifteen-hour run
+judged against it would have inherited that. Fix the instrument first is not a slogan here;
+it is the ninth, tenth and eleventh entries of the table above.
+
 ### E52  2026-08-17  The reward FORBIDS a human stance, and the check written to catch that looked at the wrong end
+
+> **PARTIALLY RETRACTED by E53.** The diagnosis below is correct: the corridor and the
+> human band do not overlap. The lever it names is wrong. The policy sits at stance 0.399,
+> 0.20 ABOVE the floor, so lowering `feet_distance_min` prices a region it never visits and
+> predicts NO EFFECT. The binding edge is `feet_distance_max`. Read E53 first.
 
 **Measured, not argued.** `feet_distance` is a corridor `[feet_distance_min 0.20,
 feet_distance_max 0.45]` at weight -3.0. Human walking stance is 0.10-0.15 m, and
@@ -257,7 +343,7 @@ P4's second clause already had, and which passed at 0.893.
 | deterministic falls | fails the gate | **0%** | 1.0 m/s, 1200 steps |
 | torso tilt | 48.87 deg BACK | **36.6 deg BACK** | held 1.0 m/s command |
 | eval falls | 15.6% at a 1000-step limit | **9.4% median at 2500** | a 2.5x harder bar |
-| gait_score | 0.21 | 0.342 | best qualifying eval |
+| gait_score | 0.21 | **0.295** | best.pt's own eval row (E53: the 0.20 previously quoted was a different checkpoint) |
 
 **P2 is the honest disappointment.** The slope clause passed with room -- **-0.048/1B against
 a -0.659 baseline**, a 13.7x reduction, so the monotone collapse that ended every previous

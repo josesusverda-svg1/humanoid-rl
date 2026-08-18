@@ -69,9 +69,15 @@ Grouped by where the question appears, in the order a person meets them.
 22. **Stance width 31.41cm vs 10.00-15.00** — is 31 cm the distance between his feet? That
     sounds like standing normally. Why is 12 cm the human number? *(Worth checking: a person
     measuring their own feet gets ~10 cm and would immediately doubt the 31.)*
-23. **[DEFECT]** **Balance 0%** is a whole category reading zero, and its only number is
-    "Left/right evenness 0.73, human 0.90 to 1.00". How does 0.73 against a target of 0.90
-    become **zero percent**? That looks like a broken calculation, not a bad robot.
+23. ~~**[DEFECT]**~~ **NOT A DEFECT -- corrected 2026-08-17 (E53).** **Balance 0%** is a
+    whole category reading zero, and its only number is "Left/right evenness 0.73, human 0.90
+    to 1.00". How does 0.73 against a target of 0.90 become **zero percent**? *(The band
+    falls off linearly over one band width, and 0.90-1.00 is a 0.10-wide band, so 0.73 is
+    1.7 band widths out and scores zero correctly. More importantly this is the single
+    LARGEST scoring gap in the project -- 18.18 of the 70.52 available points, more than
+    stance width and torso lean combined. The screen was right and the reader, me, was
+    wrong. The real question it should raise is not "is this broken" but "why is the biggest
+    gap on the dashboard the one nobody is working on".)*
 24. Same for **Reliability 11%** while "staying upright 0.08 vs human 0.00-0.05" — 0.08
     against 0.05 is close. Why is the category at 11%?
 25. **Vertical bounce 2.58cm vs human 4.00-5.00cm** — he bounces *less* than a human and that
@@ -147,8 +153,11 @@ Ordered by how badly they mislead, not by effort.
    inapplicable.
 3. **The comparison tab excludes the runs that are running and shows 24 rows of zeros**
    (Q38, Q39).
-4. **Balance reads 0% for a value of 0.73 against a 0.90 target** (Q23). Either the scale is
-   wrong or it needs explaining; as shown it reads as a broken number.
+4. ~~Balance reads 0%...~~ **WITHDRAWN (E53): the number is correct.** What survives is a
+   presentation problem, and a worse one: the largest single scoring gap in the project
+   (18.18 of 70.52 available points) is displayed as a bare "0%" with no indication that it
+   is the biggest prize on the screen. A reader -- including me -- reads zero as broken and
+   looks away.
 5. **The two clearest screens — "Обучение" and "Команды" — are fifth and eighth** (Q28,
    Q33). The order teaches the reader that the dashboard is not for them before they reach
    the parts that are.
