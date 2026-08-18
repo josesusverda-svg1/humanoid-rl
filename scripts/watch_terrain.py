@@ -20,10 +20,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # E60: measured under the TRAINER'S OWN EVAL CONDITION (mixed commands, 64 envs), not at a
-# held 1.0 m/s. The two differ by 0.42 on the same policy and the same field, because turning
-# and sideways commands on sharp ground are far harder than walking straight. K1 was set
-# against the held-command number and fired on a run that was improving.
-# E60: measured under the TRAINER'S OWN EVAL CONDITION (mixed commands, 64 envs), not at a
 # held 1.0 m/s command. The two differ by 0.42 on the same policy and the same field, because
 # turning and sideways commands on sharp ground are far harder than walking straight. K1 was
 # set against the held-command number and fired on a run that was improving.
