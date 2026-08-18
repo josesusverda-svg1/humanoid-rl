@@ -198,8 +198,35 @@ def main() -> int:
             if "eval/episode_return" in line
         ]
         if evaluations:
+            # Score the row belonging to the checkpoint the table above was rolled out from,
+            # NOT the newest row.
+            #
+            # This printed `evaluations[-1]` while the gait table beside it came from
+            # `--checkpoint` (best.pt by default), and the two are different policies:
+            # measured on runs/final-s0-20260816-201017, best.pt is iteration 9300 and scores
+            # 0.2948 with fall_rate 0.000, while the last row is iteration 11300 and scores
+            # 0.1970 with fall_rate 0.141. The report showed one policy's gait beside another
+            # policy's score and called it a human-likeness figure.
+            #
+            # This is E23 verbatim -- "quoting it beside iteration 3100's return described a
+            # policy that never existed" -- and it is instrumentation bug #11. The 20% figure
+            # this project has been quoting for its best walker belongs to a checkpoint that
+            # was never selected.
+            import torch as _torch
+
+            row = evaluations[-1]
+            ckpt_path = args.run / "checkpoints" / args.checkpoint
+            if ckpt_path.exists():
+                it = int(_torch.load(ckpt_path, map_location="cpu",
+                                     weights_only=False)["iteration"])
+                row = min(evaluations, key=lambda e: abs(int(e["iteration"]) - it))
+                if int(row["iteration"]) != it:
+                    print(f"\n(no eval exactly at iteration {it}; scoring the nearest, "
+                          f"iteration {row['iteration']})")
             print()
-            print(human_summary(score_row(evaluations[-1])))
+            print(f"scored on iteration {row['iteration']}, the row belonging to "
+                  f"{args.checkpoint}")
+            print(human_summary(score_row(row)))
     except (FileNotFoundError, ValueError):
         pass
     return 0

@@ -20,6 +20,7 @@ import yaml
 
 from humanoid_rl.algos.ppo import PPOConfig
 from humanoid_rl.envs.domain_rand import DomainRandConfig
+from humanoid_rl.terrain import TerrainConfig
 from humanoid_rl.tasks.locomotion import LocomotionConfig
 from humanoid_rl.tasks.tracking import TrackingConfig
 from humanoid_rl.algos.amp import AMPConfig
@@ -39,6 +40,10 @@ class RunConfig:
     #: "tracking" reproduces reference mocap frame by frame (Phase 3 Stage 1),
     #: "amp" follows velocity commands with an adversarial motion prior (Stage 2).
     task: str = "locomotion"
+    #: Learning algorithm. "ppo" is the shipped path; "fasttd3" selects the off-policy
+    #: trainer. They share the environment, reward, observations and humanoid model
+    #: entirely, and differ only in what consumes the transitions.
+    algo: str = "ppo"
     total_env_steps: int = 500_000_000
     output_dir: str = "runs"
 
@@ -53,6 +58,25 @@ class EnvConfig:
     #: policy, the standard rate for locomotion control.
     decimation: int = 4
     max_episode_steps: int = 1000
+    #: Randomise each env's FIRST episode length so truncations do not all land on the same
+    #: step. Matters for tasks with no early termination (get-up), where synchronized
+    #: truncation makes reset-tied machinery arrive in bursts once per episode-length of
+    #: iterations (E34: standing starts delivered reward/stand = 0.0 in 332 of 349
+    #: iterations). Keep False for evaluation envs: staggering biases episode returns.
+    stagger_initial_episodes: bool = False
+    #: How a policy action maps to a joint-angle offset.
+    #:
+    #: "fraction" (default) gives 0.6 of each joint's half-range, which covers 56.2% of joint
+    #: travel on average and only 37.5% of the knee: commandable to 1.05 rad of a 2.79 rad
+    #: range. Kneeling needs about 2.4, so a get-up is not hard to learn under it, it is
+    #: INEXPRESSIBLE. Measured on the first get-up runs: the knee peaked at 1.057 rad, the
+    #: ceiling to a hundredth.
+    #:
+    #: "full_range" takes the half-width about the NOMINAL angle instead, so coverage is
+    #: 100% on every joint while a = 0 still means the nominal pose exactly. Costs 3.1x
+    #: coarser knee resolution. Walking has never needed the extra travel, so it stays on
+    #: "fraction" and its runs are bit-identical.
+    action_scale_mode: str = "fraction"
     #: Cutoff of the one-pole low-pass on applied joint targets, in Hz. 0 disables. Exists
     #: because a policy learned to stabilise its gait with its own high-frequency action
     #: noise (vibrational stabilisation), which made deterministic evaluation collapse while
@@ -103,6 +127,10 @@ class LogConfig:
     log_interval_iterations: int = 1
 
 
+from humanoid_rl.algos.fasttd3 import FastTD3Config  # noqa: E402
+from humanoid_rl.tasks.getup import GetUpConfig  # noqa: E402
+
+
 @dataclass
 class Config:
     run: RunConfig = field(default_factory=RunConfig)
@@ -113,6 +141,11 @@ class Config:
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     amp: AMPConfig = field(default_factory=AMPConfig)
     amp_task: AMPLocomotionConfig = field(default_factory=AMPLocomotionConfig)
+    #: Get up off the floor and hold a stand. Selected by run.task = "getup".
+    getup: GetUpConfig = field(default_factory=GetUpConfig)
+    #: Off-policy alternative to `ppo`, selected by run.algo = "fasttd3". Ignored otherwise,
+    #: so a PPO run carries these defaults harmlessly and the two paths never interfere.
+    fasttd3: FastTD3Config = field(default_factory=FastTD3Config)
     #: Directory of retargeted clips, and a filter over their names.
     clip_dir: str = "data/clips"
     clip_include: tuple[str, ...] = ("FW", "BW", "SW", "TR1", "ID")
@@ -120,6 +153,11 @@ class Config:
     #: mildly uneven (1.08 on stance fraction, 1.14 median across joint pairs), and AMP
     #: reproduces whatever it is shown, so mirroring removes that bias from the target.
     mirror_clips: bool = False
+    #: Rough ground. A top-level section rather than a field on `env` so that the Oracle's
+    #: `no_config_section_is_silently_ignored` check can see it at section granularity --
+    #: a terrain block that loads into nothing would be the quietest possible way to run a
+    #: "terrain" experiment on a flat floor.
+    terrain: TerrainConfig = field(default_factory=TerrainConfig)
     domain_rand: DomainRandConfig = field(default_factory=DomainRandConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     log: LogConfig = field(default_factory=LogConfig)

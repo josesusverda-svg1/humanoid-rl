@@ -96,6 +96,14 @@ class BatchState:
     #: humanoid can hold its pelvis level while folding its torso flat, and this is the
     #: term that notices.
     torso_upright: np.ndarray
+    #: (N, 3) the torso's own z-axis in WORLD coordinates.
+    #:
+    #: `torso_upright` is only this vector's z component, i.e. cos(tilt), which is SIGN-BLIND:
+    #: a 48 degree forward stoop and a 48 degree backward arch give the identical number. That
+    #: blindness cost this project a full analysis cycle, during which a backward fold was
+    #: diagnosed, reported and nearly "fixed" as a forward lean. Any task that cares which way
+    #: the torso is bent must use this and rotate it into the heading frame.
+    torso_zaxis: np.ndarray
     #: (N,) world height of the head, normalised against its standing height.
     head_height_ratio: np.ndarray
     #: (N, n_key, 3) world positions of the key bodies (feet and hands). Used by the
@@ -109,6 +117,18 @@ class BatchState:
     lin_vel_body: np.ndarray  # (N, 3) linear velocity in the body frame
     ang_vel_body: np.ndarray  # (N, 3) angular velocity in the body frame
     heading: np.ndarray  # (N,) yaw of the root in the world XY plane, radians
+    #: (N,) world z of the ground surface directly under the root. **Identically 0.0 on a
+    #: plane**, which is what makes every terrain-aware reward term an exact algebraic no-op
+    #: on flat ground rather than an approximate one -- the flat results stay bit-comparable
+    #: and a warm start across the change is exact.
+    #:
+    #: Computed once here rather than looked up by each consumer. There are seven consumers,
+    #: and E29's lesson is that a guarantee proved for one term does not transfer to another
+    #: term in the same function: seven independent lookups would drift apart.
+    ground_z: np.ndarray
+    #: (N, n_key) the same, under each key body. A humanoid's foot is not above its pelvis,
+    #: and on rough ground the difference is the whole point.
+    key_ground_z: np.ndarray
     #: Seconds of simulated time per control step, so tasks can express rewards in
     #: physical units rather than in steps.
     dt: float = 0.02

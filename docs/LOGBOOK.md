@@ -38,6 +38,13 @@ Three rules that keep this honest:
 | Weakening gait terms so AMP owns gait shaping | WORSE | E08 | Foot slip 42-51% of travel speed vs 27% baseline, over 7 evals, never trended down. |
 | Velocity-scaled swing-height target (KSLC) | NO EFFECT | E15 | Measured on our own mocap: mean swing clearance is `0.063 + 0.020*speed`. Worth ≤0.03/step across the whole envelope. Not our problem. |
 | `difficulty_init = 0.45` | WORSE | E13 | On the OLD crushed envelope this meant 0.17 m/s commands, cheaper to ignore than follow. Retried at 0.7 on the fixed envelope: E17. |
+| Abdomen exploration floor to fix the fold | INCONCLUSIVE | E24 | Underpowered by 2x: MDE 0.38 against a predicted 0.16. All 7 arms still folded backward 34-68 deg, so the fold is structural, not exploratory. |
+| Steepening the torso posture reward | NO EFFECT expected | E23 | Measured counterfactual: straightening RAISES reward +0.13/step at equal speed. Reward already prefers upright; the problem is optimisation, not pricing. |
+| Reward normalisation to rescue FastTD3 | NO EFFECT | E22c | Critic measured unsaturated: 4.7e-16 mass on the top atom, 65 of 401 atoms in use. Scale is not the problem. |
+| ~~Single-run A/B on training outcome~~ | ~~INVALID~~ **RETRACTED** | E22b, retracted in E31 | E31 ran two configs byte-identical through 300 iterations (same returns to 4 decimals, same std). Training IS seed-deterministic. The 7x "noise floor" was never real and has been used to dismiss effects since; anything dismissed by it needs rechecking. |
+| `shaping_gamma = 1.0` against `ppo.gamma = 0.99` | WORSE | E31 | Breaks the telescoping in the DISCOUNTED sum, which is the one PPO maximises. Measured at 44.7 discounted vs 22.3 undiscounted, 58% of the whole reward signal, all of it earned by cycling up and down. Potential shaping must use the RL gamma. |
+| Ungated `upright` | WORSE | E31 | 306 of 306 non-shaping reward, and it is paid in mid-air: pelvis orientation with no ground-contact gate while `rise`, `quiet` and `posture` are all gated. |
+| Replay ratio as the FastTD3 fix | WORSE | E22 | Ratio 2 and 16 both flat, 100% falls on 96 of 96 evals. |
 | `promote_gait_match = 0.80` | INVALID | E17 | Unreachable. Measured gait match runs 0.66-0.73. Standing alone scores 0.60, so the usable band is 0.60-1.0. |
 
 ## Instrumentation bugs found
@@ -47,39 +54,2248 @@ lists what it invalidated.
 
 | Bug | Found | Invalidated | Fixed in |
 |---|---|---|---|
+| **Actuator order != qpos order**: hip_y/hip_z transposed on both legs, 4 of 28 | E25 | The joint-limit penalty scored hip_y against hip_z's tighter range at w=-5.0, penalising deep hip flexion. `tracking.py` commanded swapped hip angles on every clip. | `PreparedModel.actuator_qpos_adr` |
 | Videos played at 0.4x (125 Hz physics encoded at 50 fps) | E01 | Every visual gait judgement before it | `frame_skip`, `encode_fps` |
 | `gait_symmetry` scored 1.0 for standing still (defined over stance time) | E02 | Every symmetry claim before it | Redefined over SWING time |
 | `explained_variance` was tautological (`returns = advantages + values`) | E10 | All critic-quality claims | Renamed `advantage_share` |
 | Ablation ran 6 byte-identical arms (`amp.yaml` has no `task:` section) | E11 | The entire first ablation | `TASK_SECTION` + Oracle check |
 | **Eval counted the first 32 of 64 episodes to finish, which are the falls** | E16 | **Every fall rate, episode length and `best.pt` choice in project history** | One episode per env |
+| **`gamma = 0.99` copied from a 50 Hz repo onto our 125 Hz loop: a 0.80 s horizon, not 2.0 s** | E31 | **Every get-up run.** `hold_seconds = 2.0` sits at 250 steps, discounted to 0.081; a full get-up-and-hold to 0.00053. The task's own success criterion was outside the agent's horizon the whole time, so no reward change could have reached it. Same root as E19. | not yet fixed |
+| Potential shaping checked for telescoping in the UNDISCOUNTED sum | E31 | `getup.py:159`'s claim that "oscillating the pelvis up and down pays exactly zero". True undiscounted (22.3 net of 613.8 gross), false discounted (44.7). The proof only holds when the shaping gamma equals the RL gamma. | not yet fixed |
+| **The hold shove (0.6 m/s into qvel) violated the 0.4 m/s success conjunct by arithmetic, every attempt, re-arming on every miss** | E33 | **Every "he cannot hold" conclusion in twelve runs.** `standing_frac` 0.0% and `held_ever` 0 measured a predicate that was unsatisfiable by construction, not the policy. 3.0 of the 4.5 positive reward budget was unreachable the whole time. E29-E32's verdicts about the hold are void; their pump/cap findings stand. | `hold_push_grace` (velocity conjunct only) + `push_vel_xy` 0.7 -> 0.3 + Oracle `external_impulses_cannot_void_the_hold` |
 | Episodes were 8 s, not the 20 s every comment claimed (50 Hz assumed, we run 125 Hz) | E18 | All "survived the episode" numbers; `command_hold_range` never fired | `max_episode_steps` 1000 → 2500 |
 | `log_std` sat above its clamp, which passes no gradient | E05 | 610 iterations of frozen exploration | In-place clamp after optimiser step |
 | Normaliser `COUNT_MAX = 1e6` destroyed warm starts | E06 | Warm-started runs before it | Cap removed |
 | Heading command was an integrated yaw rate, so the target spun away | E07 | All heading-error numbers before it | XBot heading command |
+| **`gait_report.py` scored `evaluations[-1]` while rolling out `--checkpoint`**, so the human-likeness figure belonged to a different policy than the gait table beside it | E53 | **Every human-likeness number quoted in this project.** best.pt on final-s0 is iteration 9300 and scores **0.2948**; the last eval row is 11300 and scores 0.1970. The "20%" repeatedly quoted for the best walker is the 11300 row, which was never selected | `gait_report.py` now resolves the row from the checkpoint's own iteration |
 
 ## Current state
 
-Best policy: `runs/envelope-20260814-100402/checkpoints/best.pt` (PPO, 500M steps).
-All numbers below are post-E16, so they are the first trustworthy ones in the project.
+Best policy: `runs/final-s1-20260817-112115/checkpoints/best.pt`, iteration 9500 (E54).
 
-| Metric | Value | Human | Note |
+| Metric | **seed 1** | seed 0 | envelope best.pt | Condition |
+|---|---|---|---|---|
+| speed | **1.06** | 0.851 | 0.694 | held 1.0 m/s command |
+| torso_upright | **0.909** | 0.803 | 0.658 | held 1.0 m/s command |
+| torso tilt | **24.7 deg BACK** | 36.6 BACK | 48.9 BACK | held 1.0 m/s command |
+| worst tracking ratio | **0.93** | 0.85 | 0.69 (fails) | amp_readiness sweep |
+| deterministic falls | **0%** | 0% | fails gate | 1.0 m/s, 1200 steps |
+| step rate | 2.75/s | **1.94/s** | - | human 1.6-2.0, seed 1 is OUT of band |
+| human-likeness | 26% | **29%** | 21% | best.pt's own eval row |
+
+Note the last two rows: seed 1 walks faster and stands straighter, and scores LOWER on
+human-likeness, because it takes short quick steps (stride 0.39 m against 0.47). Which of
+those two facts is the instrument's fault is not established. Do not quote one number from
+this table beside another run's condition -- that mistake has been made twice here (E23, E53).
+
+The previous holder, `runs/envelope-20260814-100402` iteration 3100, is kept below as the
+baseline the E51 and E54 numbers are quoted against.
+
+| Metric | final-s0 | envelope best.pt | Condition | Human |
+|---|---|---|---|---|
+| speed | **0.851** | 0.694 | held 1.0 m/s command | 1.2-1.4 |
+| tracking ratio | **0.85** | 0.69 | held 1.0 m/s command | 1.0 |
+| torso_upright | **0.803** | 0.658 | held 1.0 m/s command | 0.95-1.00 |
+| torso tilt | **36.6 deg BACK** | 48.5 deg BACK | held 1.0 m/s command | upright |
+| deterministic falls | **0%** | fails the gate | 1.0 m/s, 1200 steps | 0% |
+| eval falls | **9.4% median** | 15.6% | **NOT COMPARABLE**: 2500-step limit vs 1000 | 0-5% |
+
+The fall rates in the last row are measured under different episode limits and must not be
+compared as if they were one number -- surviving 20 s is a 2.5x harder bar than surviving 8 s.
+This table has produced a policy that does not exist once already, by mixing conditions in one
+column.
+
+**AMP readiness: READY (E51).** Gates 1-3 all pass: deterministic falls 0% (need <20%), no
+noise crutch (1200 steps deterministic vs 1200 with noise), worst tracking ratio 0.84 inside
+the 0.52-1.24 m/s clip band (need >=0.70). Gate 4 (step rate and stride, from
+`scripts/gait_report.py`) is NOT yet measured on this policy.
+
+The stale numbers this table used to carry, kept so the change is legible:
+
+READ THE CONDITION COLUMN. An earlier version of this table mixed three different
+measurement conditions into one column and produced a policy that does not exist.
+
+| Metric | Value | Condition | Human |
 |---|---|---|---|
-| falls (deterministic) | 6% | - | at a held 1.0 m/s command |
-| forward speed | 0.78 m/s | 1.2-1.4 | mocap reference is 0.62 |
-| speed tracking ratio | 0.51-0.59 | 1.0 | responds to command, undershoots ~40% |
-| stride length | 0.30 m | 0.6-0.8 | was 0.11 three runs ago |
-| step rate | 2.62 /s | 1.6-2.0 | too fast |
-| stance width | 0.36 m | 0.10-0.15 | too wide |
-| **torso upright** | **0.54** | **0.95-1.00** | **worst term; it leans to go fast** |
-| human-likeness | 9% | 100% | fell from 15% as speed rose |
+| return | 3034 | eval at iter 3100 | - |
+| falls | 15.6% | eval at iter 3100 | - |
+| episode length | 931 steps (7.4 s) | eval at iter 3100 | - |
+| mean speed | 0.589 m/s | eval at iter 3100, mixed commands | 1.2-1.4 |
+| speed | 0.78 m/s | held 1.0 m/s command, gait_report | 1.2-1.4 |
+| torso_upright | **0.726** | eval at iter 3100 | 0.95-1.00 |
+| torso_upright | 0.658 | held 1.0 m/s command | 0.95-1.00 |
+| torso tilt DIRECTION | **48.5 deg BACKWARD and LEFT** | held 1.0 m/s command | upright |
 
-AMP readiness: **NOT ready**. Passes "stays up", fails "obeys speed" (0.58 vs 0.70 needed).
+The often-quoted `torso_upright 0.543` belongs to iteration **5050**, a later and WORSE
+checkpoint (return 2328, falls 29.7%) that was never selected as best. Quoting it beside
+iteration 3100's return described a policy that never existed.
 
----
+AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- superseded by E51.**
 
 ## Entries
 
 Newest first. `E##  date  what changed`.
+
+### E60  2026-08-18  K1 fired on a run that was improving. The baseline and the gate measured different things
+
+**K1 fired at 101 M: rough `eval/fall_rate` 0.781 against a threshold of 0.75, having started
+at 0.490.** Read literally: the warm start is being destroyed. The pre-registered response is
+to stop.
+
+**I did not stop, and the measurement says that was right.** The 0.490 baseline was taken at a
+**held 1.0 m/s forward command**. The trainer's evaluation uses the full command distribution
+-- forward, backward, sideways and turning, at difficulty 1.0. Re-measured on the same policy
+and the same field, under the trainer's own eval condition:
+
+| condition | zero-shot fall rate |
+|---|---|
+| held 1.0 m/s forward | **0.490** |
+| the trainer's eval, mixed commands | **0.906** |
+
+**0.42 apart, same policy, same ground.** Turning and moving sideways across sharp relief is
+far harder than walking straight over it, and the eval spends most of its time doing exactly
+that. Against the correct baseline the run reads:
+
+    0.906 zero-shot  ->  0.844  ->  0.797  ->  0.641  ->  0.781
+
+Every evaluation is BELOW the starting point. The run is adapting, not degrading, and the gate
+fired because I compared a number to a differently-measured number.
+
+**Same class as E51's three unreachable bars, and this is the fifth time this week.** The
+recurring form is not "wrong threshold". It is **stating a bar against a quantity measured
+under conditions other than the ones the bar will be evaluated in.** E51 compared an achieved
+average over a command distribution against a capability threshold. E57 asked for rough speed
+at 90% of flat without ever measuring rough speed. This compared held-command falls against
+mixed-command falls.
+
+**Why this is a correction and not a rescue, stated so it can be checked.** E48's rule is that
+weakening an acceptance bar to fit a result is the move this project has regretted every time,
+and E49's is that a pre-registered response may be overruled by MEASUREMENT but not by
+argument. The test that separates the two here: if the run were genuinely degrading, its evals
+would sit ABOVE the correct 0.906 baseline. They sit below it, and the best of them is 0.265
+below. The correction survives the test that would have caught a rationalisation.
+
+Corrected: watcher baseline 0.490 -> **0.906**, flat baseline 0.000 -> 0.047 (also a
+held-command number originally), K1 threshold 0.75 -> **0.95**, and the primary prediction
+restated as **rough `eval/fall_rate` <= 0.45 under the eval condition**, roughly halving 0.906.
+
+**What the run is actually doing**, none of which K1 could see: training episode length climbed
+861 -> 1484 over the first 400 iterations, return 3676, `approx_kl` max 0.0208 against K2's
+ceiling of 1.0, `eval/torso_upright` 0.899-0.925 on sharp ground, and `eval_flat/fall_rate`
+0.000-0.047, so the flat ability that prediction 2 protects is intact.
+
+### E59  2026-08-18  Sharpened the relief, and stopped a threshold from being chased
+
+**"Make the roughness more sharp."** The field was band-limited and box-smoothed, so it was
+rolling waves rather than broken ground. Sharpness is now a parameter: the field is blended
+with its ridged transform `1 - |x|`, which folds it at every zero crossing and turns smooth
+troughs into creases.
+
+At EQUAL amplitude, so only the shape differs, measured on the compiled grid:
+
+| | slope p50 | slope p95 | slope max | curvature p95 | stride change p95 | zero-shot falls |
+|---|---|---|---|---|---|---|
+| smooth | 6.7 deg | 13.8 | 29.7 | 2.20 | 4.91 cm | 35.4% |
+| **ridged** | 10.6 | **24.6** | **50.9** | 4.19 | 7.82 cm | **49.0%** |
+
+**Sharpened by SHAPE, not by shortening the correlation length**, and that choice is
+load-bearing. Dropping `correlation_short` to 0.15 m reaches a similar slope (21.3 deg p95)
+but makes the features 1.5 cells wide -- narrower than the foot's 0.090 m short axis -- so a
+box foot lands on a single contact point, which is the line-contact defect box feet exist to
+avoid (README.md:66). Measured in a rollout, the ridged transform did the opposite: contacts
+per foot went **2.8 -> 3.2**, because it steepens transitions while leaving feature SIZE to
+the correlation length.
+
+**THE PART WORTH KEEPING IS ABOUT THE CHECK, NOT THE TERRAIN.** The preflight bounded the
+roughest patch at 8 cm, justified by the roughest homogeneous field ever measured (6.19 cm at
+64.1% zero-shot falls). The first ridged field failed it. I raised the bound to 12 cm citing a
+new measurement -- 9.32 cm p95 at 49.0% zero-shot falls, i.e. genuinely EASIER than the 6.19 cm
+smooth field. Then it failed again at 12.62 cm, and my next instinct was to raise it again.
+
+**That is the behaviour I criticised in E57 four hours earlier**, in this file: *"a check that
+gets loosened whenever it blocks something is a rubber stamp."* Raising it once on new evidence
+was defensible. Raising it twice would have meant the threshold was tracking my intent rather
+than the world.
+
+The correct reading of a bound that must move twice is that **it is measuring the wrong
+quantity**. Stride-to-stride change is not comparable across sharpness: folding the field
+raises local height differences much faster than it raises difficulty, which is why 9.32 cm
+ridged is easier than 6.19 cm smooth. So the structural bound was deleted, not widened, and
+the gate is now the quantity that actually matters -- **zero-shot fall rate, measured directly**
+by `preflight_terrain.py --policy <checkpoint>`, a 400-step deterministic rollout costing
+about thirty seconds. It fails above 60%, where a warm start stops adapting and starts
+retraining. Without `--policy` the script now says the difficulty gate was SKIPPED rather than
+substituting a proxy for it.
+
+**The final field**, all preflight checks passing including the measured one:
+
+| | |
+|---|---|
+| flattest 5% of patches | 1.12 cm per 0.30 m step |
+| roughest 5% | 9.32 cm |
+| flat-to-rough ratio | **8.3x** |
+| slope p95 / max | 24.6 deg / 50.9 deg |
+| ground_z spread across spawns | 17.5 cm |
+| **zero-shot falls (the gate)** | **49.0%**, against 1.6% flat |
+
+E58's predictions carry over with the primary bar restated against 49.0%: **deterministic
+falls on rough <= 20%** at a held 1.0 m/s command. *Reachable*: the same policy takes 1.6% on
+flat and the run must cut 49% by roughly three fifths, which is less than the two-thirds cut
+E57 asked for on an easier field.
+
+### E58  2026-08-18  The field was uniform. It is now heterogeneous, after two failed attempts
+
+**"So it'll be very rough at some area, then it will be kind of flat another area. So every
+time is random and complex."** The field E57 built was statistically HOMOGENEOUS: one
+amplitude everywhere, so every spawn met the same difficulty and an episode travelling 24 m
+never encountered ground different from where it started.
+
+**This also retires an argument I made two days ago.** The terrain design rejected spatial
+difficulty variation on the grounds that "episodes travel further than any spatial band this
+field can afford to carry, so the spawn level stops describing the episode within seconds."
+That is a valid objection to a spatial CURRICULUM, where the spawn location must label what
+the episode experiences. It is not an objection to HETEROGENEITY, which wants exactly that
+property: crossing from flat to rough inside one episode is the thing being trained.
+
+**Two attempts failed before one worked, and both failed the same way -- by controlling a
+number instead of a distribution.**
+
+1. **Envelope applied after the global rescale.** Normalising the field to its roughest patch
+   divides every other patch down. Measured: local relief 0-3.7 cm on a field configured at
+   14 cm -- gentler everywhere than the uniform 5.25 cm field it was replacing.
+2. **Envelope squared and normalised over the whole 40 m field.** With a 10 m patch size there
+   are only ~16 independent patches, so the top of the range is reached in about one of them
+   and the +-12 m spawn square often does not contain it. Measured stride-to-stride change
+   spanned 1.24-1.90 cm across 121 patches: the entire field equivalent to a homogeneous
+   4-6 cm one, against the 1.62 cm of the 5.25 cm field it was meant to exceed.
+
+Both were caught only because the check was **stride-to-stride ground change**, the quantity a
+foot actually experiences, rather than peak-to-peak relief in a window, which mixes gentle
+hills with real roughness and reported the second attempt as fine.
+
+**What works: rank mapping.** The envelope is mapped through its own quantiles, computed over
+the spawn square, so every quantile is present by construction and "a quarter of the field is
+near flat" is true by definition rather than by luck of the draw. Measured, 81 patches:
+
+| | stride change per 0.30 m step |
+|---|---|
+| flattest 5% of patches | **0.95 cm** |
+| median | 3.7 cm |
+| roughest 5% | **6.12 cm** |
+| worst patch | 7.18 cm |
+| ratio across the field | **6.5x** |
+
+For scale, on homogeneous fields: 5.25 cm -> 1.62 cm (6.2% zero-shot falls), 14 cm -> 4.33 cm
+(35.9%), 20 cm -> 6.19 cm (64.1%). So this one field spans from easier than the field that was
+"not so rough" to as hard as the hardest ever measured here.
+
+**A REGRESSION I INTRODUCED, caught by a guard written for something else.** The envelope edit
+silently deleted the flat disc at the origin -- the edit replaced the block that applied it.
+The field then PASSED at `half_extent` 20 by luck (the envelope happened to be low near the
+origin) and FAILED at 40. What caught it was the zero-contact assertion added to `prepare()`
+in E53: *"the nominal pose starts in contact (20 contacts) at root height 0.8789"*. That guard
+was written because `model_prep`'s sag check was one-sided, for reasons having nothing to do
+with terrain generation, and it paid for itself here. The disc is now applied LAST, so no
+later step can reintroduce relief at the origin.
+
+**And the preflight was still enforcing the model E57 refuted.** I rewrote the Oracle
+invariant against the measurements and left the paired check in `preflight_terrain.py`
+untouched, so it failed the corrected field on a 3.5 cm ceiling derived from the gait-clock
+argument. Rebuilt on the same basis, and it now checks the thing that actually matters:
+the field must contain genuinely flat ground, genuinely rough ground, a roughest patch inside
+what has ever been measured, and a flat-to-rough ratio above 2.5x. A uniform ceiling passes a
+uniform field, which is the failure being fixed.
+
+**Revised zero-shot baseline**, E54's walker, deterministic, 1.0 m/s, 128 envs:
+
+| field | falls | spawn ground_z spread |
+|---|---|---|
+| flat control | 1.6% | 0.0 cm |
+| heterogeneous | **31.2%** | 14.3 cm |
+
+E57's predictions carry over with the primary bar restated against 31.2%: **deterministic
+falls on rough <= 12%** at a held 1.0 m/s command. The other four are unchanged.
+
+### E57  2026-08-18  The terrain was too flat, and the argument that chose it was wrong
+
+**"It's not so rough, the terrain."** That was the whole prompt, and it was right.
+
+**The refuted argument.** E55 set relief at 5.25 cm as 0.75 of a 7 cm "ceiling", derived from
+the gait clock: stride-to-stride ground change becomes a touchdown timing error, and past the
+stance transition width the TERRAIN rather than the policy would be what loses `gait_phase`,
+27.8% of the reward budget. Measured on E54's walker, deterministic, 1.0 m/s, 64 envs:
+
+| p2p | gait_phase | lin_vel | torso_upright | zero-shot falls |
+|---|---|---|---|---|
+| 0.00 cm | 0.8054 | 0.5844 | 0.5272 | 0.0% |
+| 5.25 cm | 0.7967 | 0.5237 | 0.5236 | **6.2%** |
+| 9.00 cm | 0.7802 | 0.4697 | 0.5220 | 9.4% |
+| 14.00 cm | 0.7242 | 0.3941 | 0.5229 | **35.9%** |
+| 20.00 cm | 0.6957 | 0.2988 | 0.5146 | 64.1% |
+
+**At 20 cm, nearly 3x the supposed ceiling, `gait_phase` has fallen 13.6% and `torso_upright`
+has barely moved.** The clock is not taken away at any relief measured. What rough ground
+actually costs is SPEED: `lin_vel` drops 49%. The model predicted the wrong quantity would
+break, so it could never have set the right number.
+
+**And the number it set was the harmful direction.** At 5.25 cm the trained walker already
+survives 94% of episodes with no training at all. That run would very likely have returned
+NO EFFECT and been written up as "terrain training completed", which is the worst outcome
+available -- not a failure, a false success.
+
+**14 cm chosen from the difficulty ladder rather than from a model**: 35.9% zero-shot falls
+means there is real work, and 64% of episodes still surviving means the warm start is on
+distribution. 20 cm is where a warm start starts to be off-distribution.
+
+**The Oracle invariant I wrote two days ago encoded the refuted model, and it fired on the
+corrected config.** `terrain_is_rough_enough_to_matter_and_not_so_rough_it_takes_over`
+computed the same timing-error ceiling and rejected 14 cm at 1.98x. I rewrote the check
+against the measurements above rather than widening its threshold to fit -- it now flags
+**below 8 cm** as too easy to teach anything (the failure that actually happened) and **above
+20 cm** as unmeasured rather than known-bad, which is what the evidence supports. A check that
+gets loosened whenever it blocks something is a rubber stamp; a check whose model is refuted
+should be rebuilt on the measurement that refuted it.
+
+**Revised baseline for E55's predictions**, which were all stated against 7.8% and must move:
+
+| | old field (5.25 cm) | new field (14 cm) |
+|---|---|---|
+| zero-shot falls, rough | 7.8% | **35.9%** |
+| zero-shot falls, flat | 0.0% | 0.0% |
+
+1. **PRIMARY: deterministic falls on rough <= 12%** at a held 1.0 m/s command. *Reachable*:
+   the same policy takes 6.2% on the 5.25 cm field with no training, so 12% on a field 2.7x
+   rougher is a real but not absurd target. Not trivially met: it must cut 35.9% by two thirds.
+2. **Flat ability is not traded away**: `eval_flat/fall_rate` <= its iteration-100 value + 0.10.
+3. **Terrain is experienced**: `ground_z` spread across spawns > 10 cm. *Guard, not a test.*
+4. **Speed is not paid for survival**: rough speed at the end >= 75% of the same policy's flat
+   speed. Loosened from E55's 90% because the zero-shot measurement above now shows what
+   terrain costs speed -- `lin_vel` 0.584 -> 0.394 at 14 cm, a 33% loss before any adaptation.
+   E55 stated 90% while explicitly admitting I had never measured rough-ground speed; I have
+   now, and 90% was unreachable by construction. Third bar in three days corrected for that.
+5. Nothing is claimed about human-likeness from this run.
+
+Kill criteria unchanged from E55 except K1, whose threshold moves with the baseline: fire if
+rough `eval/fall_rate` > 0.75 at 100 M (started at 0.359).
+
+### E56  2026-08-18  E55 KILLED at iteration 45. The learning rate, not the warmup
+
+> **CORRECTED an hour after writing, by the four-arm experiment appended at the end.** The
+> original title and thesis of this entry were *"`critic_warmup_updates` CAUSED the failure it
+> exists to prevent"*. That is **wrong**. The warmup neither caused nor cured it: it moved the
+> death from iteration 1 to iteration 31 and made it 1.4x worse. The cause is starting a
+> **good** policy at `learning_rate: 1.0e-3`. The mechanism paragraphs below are accurate as
+> far as they go; the attribution was not, and I wrote it from one arm.
+
+
+**K2 fired within four minutes of launch and the run was stopped, as pre-registered.** `approx_kl` reached **300.97**, against K2's threshold of 1.0 and against the 24.45 that E38 recorded as the warm-start disaster this very setting was added to fix.
+
+**The trace is unambiguous:**
+
+| iter | approx_kl | warmup | lr | ep length | value_loss |
+|---|---|---|---|---|---|
+| 1-30 | **0.0000** | on | 1.00e-03 | 0 -> **1492** | ~1200 |
+| **31** | **300.97** | **off** | 1.32e-04 | 1516 | 1105 |
+| 32 | 0.101 | off | 1.73e-05 | 1587 | **31969** |
+| 34 | 0.017 | off | 1.73e-05 | **298** | 21406 |
+| 39 | 0.008 | off | 1.73e-05 | **138** | 19029 |
+
+Through the whole warmup the policy was healthy and improving -- episode length climbed 0 to 1492, return to 4400. It was destroyed in the **single update** where the actor was first allowed to move, and it never recovered.
+
+**The mechanism, exactly.** `ppo.py:429` reads
+
+```python
+if cfg.adaptive_lr and self._updates_done >= cfg.critic_warmup_updates:
+    self._adapt_learning_rate(...)
+```
+
+so the learning-rate controller is **disabled for the whole warmup**. The LR therefore sits at its initial `1.0e-3` for 30 updates while the actor is frozen, and at iteration 31 the actor takes its **first** step at a rate the controller has never had a chance to calibrate -- through 5 epochs x 10 minibatches, 50 gradient steps. The controller then engages and slams the LR to 1.3e-4 and 1.7e-5, one update too late.
+
+**Why the same LR is harmless cold and fatal warm.** Measured on this exact config:
+
+| start | policy at first actor update | approx_kl at lr 1.0e-3 |
+|---|---|---|
+| cold | random | **0.0855** |
+| warm | E54's walker | **300.97** |
+
+**3,520x on the same learning rate.** A random policy has small, incoherent advantages, so a large step barely moves the distribution and the controller has time to adapt down. A good policy has large, coherent advantages, so the same step moves it enormously. The learning rate is not a property of the optimiser here; it is a property of the optimiser AND the policy it starts from, and nothing in the config expresses that.
+
+**This is the sharpest instance yet of a pattern that now has four entries.** E38 measured a warm-start blow-up and added `critic_warmup_updates` as the remedy. I copied that remedy into a warm-started run, wrote a comment explaining that it was REQUIRED here, and pre-registered a gate against E38's own number -- and the remedy produced a blow-up **12x larger than the one it was named after**. The warmup did not fail to help; it is the direct cause, because freezing the actor is exactly what denies the LR controller the measurements it needs before the actor moves.
+
+The general form, and it is the same shape as E52's check and E51's bars: **a remedy written against a failure's symptom can create that failure through a different route, and a gate written against the old number will not tell you which route you are on.** K2 caught this only because it was written as an absolute ceiling on `approx_kl` checked every poll, rather than as a comparison against E38's 24.45 at a step milestone. Had it been written the second way -- which was my first instinct -- it would have fired at 100 M env steps, forty minutes after the policy was already dead.
+
+**What is NOT damaged.** The source policy `runs/final-s1-20260817-112115/checkpoints/best.pt` is untouched; the terrain run wrote no `best.pt` at all (eval interval 100, died at 45). The terrain itself is not implicated: the field, the spawn rule, the world-z fixes and the dual eval all behaved, and the zero-shot measurement that a warm policy takes 7.8% falls on this ground still stands.
+
+**Not relaunched.** K4 forbids a reflex re-tune, and the obvious fix (start at `lr_min` and let the measured-KL controller climb) is a hypothesis about a 15-hour run that costs about two minutes to test. Tested first, then launched.
+
+
+**THE FOUR-ARM EXPERIMENT, run before relaunching anything.** Warm-started from E54's walker
+in every arm; only the two named settings differ. Healthy means episode length STAYS high.
+
+| arm | learning_rate | critic_warmup | max approx_kl | final ep length | |
+|---|---|---|---|---|---|
+| A | 1.0e-3 | 30 | **300.97** at iter 31 | 138 | destroyed |
+| B | 1.0e-3 | 0 | **207.98** at iter 1 | 131 | destroyed |
+| C | **1.0e-5** | 0 | **0.0204** | **1880** | healthy |
+| D | 1.0e-5 | 30 | 0.0103 | 1765 | healthy |
+
+**A and B are the same failure at different times.** The warmup does not cause it and does not
+prevent it; it defers the actor's first move to iteration 31 and lets it land 1.4x harder,
+because thirty extra critic updates sharpen the advantages the actor then steps on.
+**C and D are both healthy**, so the warmup is not the cure either. The single variable that
+decides the outcome is the learning rate.
+
+This retires the explanation in the corrected header above, and it also puts a question mark
+over E38, which diagnosed its own approx_kl 24.45 as a critic-staleness problem and prescribed
+`critic_warmup_updates` for it. On this evidence that was very likely an unadapted-learning-rate
+problem too, and the remedy that has been carried forward since is treating a symptom. **Not
+claimed as settled**: E38's run cannot be re-measured from here, and one experiment on a
+different task is not a retraction of another entry's verdict.
+
+**The fix, and why it is one change rather than two.** `learning_rate: 1.0e-5` -- which is
+`lr_min`, the floor the adaptive controller is already allowed to use -- and `critic_warmup_updates`
+back to 0. C beats D on episode length (1880 vs 1765) with one fewer moving part, and E20's rule
+is one change per run. The controller then climbs on measured KL, reaching 7.59e-05 by iteration
+40 in arm C, which is what `adaptive_lr` exists to do and what a hand-set 1.0e-3 was preventing
+it from doing.
+
+**The general lesson, which is the fourth of its kind this week.** A learning rate is not a
+property of the optimiser alone. It is a property of the optimiser **and the policy it starts
+from**: the same 1.0e-3 gives approx_kl 0.0855 from a random policy and 207.98 from a trained
+one, a 2,400x difference, because a good policy has large coherent advantages where a random
+one has small incoherent ones. `configs/*.yaml` has no way to express "this rate is for cold
+starts", and every warm start in this project has inherited a number chosen for a cold one.
+
+### E55  2026-08-18  PRE-REGISTERED BEFORE LAUNCH: rough ground, warm-started
+
+**Run**: `configs/terrain.yaml`, warm-started from `runs/final-s1-20260817-112115/checkpoints/best.pt` (E54's policy). ONE change against `configs/final.yaml`: the ground. No reward weight, sigma, threshold or observation moves. Terrain is a change to the WORLD, which is why it is readable at all.
+
+Field: one static band-limited heightfield, 80 m at a 0.10 m cell, 5.25 cm peak-to-peak, baked before the model pool is copied and never mutated. 0 oracle contradictions, 13 ok. 17-check preflight passed. See E-terrain notes in `humanoid_rl/terrain/field.py`.
+
+**THE ZERO-SHOT BASELINE, measured before launch and the thing every prediction is stated against.** E54's policy, deterministic, held 1.0 m/s command, 64 envs, 600 steps:
+
+| ground | falls | steps survived |
+|---|---|---|
+| flat (control) | **0.0%** | 600 of 600 |
+| rough 5.25 cm | **7.8%** | 588 of 600 |
+
+That is the ideal warm-start condition: the terrain bites but does not destroy, so the policy starts on-distribution and has something to learn. It also means **the run has to beat 7.8%, not 100%** -- a run that ends at 5% has done almost nothing, and stating that now prevents reading a small improvement as a success.
+
+**Pre-registered, with a reachability argument on each, because E51 shipped three bars no correct policy could have met:**
+
+1. **PRIMARY: deterministic falls on rough <= 3.0%** at a held 1.0 m/s command, measured exactly as the baseline above. *Reachable*: the same policy already achieves 0.0% on flat and 7.8% on rough with no training at all, so the gap to close is 7.8 points on a task it nearly solves. Not trivially met: it must more than halve.
+2. **The flat ability is NOT traded away.** `eval_flat/fall_rate` at the end <= its own value at iteration 100 plus 0.10. *Reachable*: the dual-eval env exists precisely to measure this, and the policy begins at 0.0% flat. Fires if the run buys rough-ground survival by forgetting flat ground -- which is the cheapest way to satisfy prediction 1.
+3. **The terrain is actually experienced.** `ground_z` spread across spawns > 4.0 cm. *Reachable*: measured 4.82 cm in preflight. This is a GUARD, not a test -- it fails only if terrain silently stops reaching the envs, which is the failure mode `field.py` was built to make impossible.
+4. **Speed is not paid for survival.** Mean speed on rough at the end >= 90% of the same policy's flat speed at the same command. *Reachable*: unknown margin, and stated as the honest weak bar of the four -- I have not measured rough-ground speed for the warm-start policy, only its fall rate. If it fails I cannot separate "terrain costs speed" from "the bar was wrong", and that is a defect in this prediction rather than in the run.
+5. **Nothing is claimed about human-likeness from this run.** Step rate, stance width and the gait score are measured on flat ground and their bands are defined against level walking; E53 already found the scorer reading the wrong checkpoint, and E54 found the better-walking policy scoring lower. Terrain numbers do not get compared to those bands.
+
+**Kill criteria**, thresholds in env steps:
+- **K1, at 100 M**: `eval/fall_rate` on rough > 0.60. The warm start begins at 0.078; a rise to 0.60 means the warm start is being destroyed rather than adapted, which is E38's failure with a different cause.
+- **K2, at 100 M**: `approx_kl` at any logged iteration > 1.0. E38 measured 24.45 on a warm start without critic warmup; `critic_warmup_updates: 30` was added to this config for exactly that, and this is the check that it worked.
+- **K3, at 500 M**: `eval_flat/fall_rate` > 0.30 while `eval/fall_rate` improves. That is the trade in prediction 2 happening, and it means stop rather than continue.
+- **K4**: no mid-run config edit, and no re-tune if a prediction misses. Same rule as E50's K4/K5.
+
+### E54  2026-08-18  SEGMENT 2 VERDICT: **WORKED**, and the seed lottery is dead
+
+**Run**: `runs/final-s1-20260817-112115`, 11,393 iterations, 2.80 B env steps, 14.9 h. Byte-identical to segment 1 but for `run.name` and `run.seed`, verified by diff before launch. Full budget, no kill criterion fired.
+
+| # | Prediction | seed 0 | seed 1 |
+|---|---|---|---|
+| 1 | `action_std` <= 0.501 | PASS | **PASS** |
+| 2 | slope >= -0.10/1B AND last >= first | FAIL | **FAIL** (slope -0.015 pass, endpoints 0.888 -> 0.835 fail) |
+| 3 | upright>=0.85 AND falls<=0.15 AND speed>=0.75 | FAIL | **PASS, 3 evals** |
+| 4 | speed >= 0.85 AND ratio >= 0.80 | FAIL | **FAIL** on speed 0.773, **ratio 1.101** |
+| 5 | gait_score >= 0.40 | FAIL 0.342 | FAIL 0.276 |
+| 6 | amp_readiness gates 1-3 | PASS | **PASS**, worst ratio 0.93 vs 0.85 |
+| 7 | torso tilt < 30 deg | FAIL 36.6 | **PASS, 24.7 deg** |
+| 8 | seed spread < 3.0x | - | **PASS, 1.023x** |
+
+**5 of 8 against segment 1's 2 of 7. Verdict WORKED.**
+
+**P7 was called "the boldest and least-supported prediction" in E50 and it passed.** Torso tilt 48.87 deg backward on the old `best.pt`, 36.6 on seed 0, **24.7 on seed 1** -- and `torso_upright` at a held 1.0 m/s went 0.658 -> 0.803 -> **0.9085**. The lean is not fixed, but it has halved twice.
+
+**P8 KILLS THE SEED LOTTERY, AND THAT MATTERS BEYOND THIS RUN.** Mean `eval/episode_length` over the last five evals: seed 0 **2274.9**, seed 1 **2224.3**, ratio **1.023**. E22b measured **5.9x** on a byte-identical pair and that number has been used since to dismiss effects as noise, at a 7x floor. Two full 2.8 B runs differing only in the seed land within **2.3%** of each other on episode length. **Single-run A/B on this codebase is readable.** Anything dismissed under E22b's floor should be rechecked.
+
+**What seed 1 bought at a held 1.0 m/s command:**
+
+| | envelope best.pt | seed 0 | seed 1 |
+|---|---|---|---|
+| speed | 0.694 | 0.851 | **1.06** |
+| torso_upright | 0.658 | 0.803 | **0.9085** |
+| tilt | 48.9 deg BACK | 36.6 BACK | **24.7 BACK** |
+| worst tracking ratio | 0.69 (fails gate) | 0.85 | **0.93** |
+| deterministic falls | fails gate | 0% | **0%** |
+
+**P2 failed on both seeds, and E50's pre-registered fallback does NOT fire.** E50 named `gae_lambda` as the residual **if P7 failed while P2 and P3 passed**. On seed 1, P7 and P3 PASSED and P2 failed -- the opposite pattern. The conclusion does not apply and `gae_lambda` stays untested.
+
+**And I retract, in this entry, a claim I made from the middle of this run.** At 2.06 B I concluded from both seeds dipping between 1.0 B and 1.5 B that "the posture collapse is built into the reward". It is not. It is an OSCILLATION, and both seeds recover:
+
+| window | s0 | s1 |
+|---|---|---|
+| 0.50-0.75B | 0.866 | 0.947 |
+| 1.25-1.50B | 0.733 | 0.745 |
+| 1.50-1.75B | 0.765 | **0.661** |
+| 2.25-2.50B | 0.810 | **0.916** |
+
+I read a trough as a floor because my window ended in it. Third time in this logbook that I have drawn a conclusion from a window that stopped at the wrong place; the previous two were caught by a script and by an audit, this one by the run continuing.
+
+**What survives from that analysis, because it was measured rather than inferred.** Decomposing reward/step across the dip, median over 0.75-1.00 B against 1.40-1.65 B, seed-averaged:
+
+```
+bought:  lin_vel +0.116, ang_vel +0.094, orientation +0.067,
+         gait_phase +0.047, torque +0.046      = +0.370/step
+paid:    torso_upright                          -0.089/step     -> 4.2 : 1
+```
+
+`orientation` measures the PELVIS and improves while `torso_upright` measures the CHEST and falls, on both seeds. The policy folds at the waist: pelvis level, torso back. That is the failure `model_prep.py` documents as the reason the upper-body sensors exist -- *"the pelvis stayed level at the right height throughout, so every reward term was satisfied"* -- returning backward instead of forward, because the pelvis term (`w_orientation` -1.0) was never removed and outweighs the chest term (`w_torso_upright` 0.6). Two terms measure the same physical quantity at two places on the body and pull in opposite directions. That is real, it is E29's class, and it is a candidate for a future run -- but it is a detour on the way to a good policy, not a wall.
+
+**Gate 4 is now the open one.** `gait_report` on seed 1's `best.pt`: step rate **2.75/s** against a human 1.6-2.0 and against seed 0's 1.94. It walks 1.06 m/s by taking short quick steps (stride 0.39 m against seed 0's 0.47). Human-likeness 26% against seed 0's 29%: seed 1 wins Posture 47% vs 33% and loses Rhythm 45% vs 50% and Reliability 26% vs 45%. **The better-walking policy scores lower on the human-likeness metric**, and which of those two facts is the instrument's fault is not yet established.
+
+**Best policy is now `runs/final-s1-20260817-112115/checkpoints/best.pt`**, iteration 9500.
+
+### E53  2026-08-17  Bug #11, and E52's remedy was aimed at the wrong edge
+
+**INSTRUMENTATION BUG #11, and it invalidates every human-likeness number this project has
+quoted.** `scripts/gait_report.py` rolled out the policy named by `--checkpoint` (default
+`best.pt`) to build its gait table, and then scored `evaluations[-1]` -- the newest metrics
+row, a different policy. Measured on `runs/final-s0-20260816-201017`:
+
+| | iteration | overall | fall_rate | heading err |
+|---|---|---|---|---|
+| what the table showed | 9300 (`best.pt`) | **0.2948** | 0.000 | 11.23 deg |
+| what the score showed | 11300 (last row) | 0.1970 | 0.141 | 17.87 deg |
+
+The best walker this project has produced scores **29%**, not the 20% quoted for it
+repeatedly over the last two days. This is E23's defect verbatim -- *"quoting it beside
+iteration 3100's return described a policy that never existed"* -- committed again, in a
+different file, by the same hand that wrote the warning at the top of this logbook. Fixed:
+`gait_report.py` now reads the checkpoint's own `iteration` and scores the matching row, and
+prints which row it scored.
+
+**E52's DIAGNOSIS STANDS. ITS IMPLIED REMEDY DOES NOT.** E52 established that the
+`feet_distance` corridor [0.20, 0.45] and the human band [0.10, 0.15] do not overlap, which
+is true and is still the finding. It then pointed at `feet_distance_min` as the lever. That
+is wrong, and the measurement says so plainly: at a held 1.0 m/s over 64 envs x 12 s the
+stance is **mean 0.399, p1 0.199, p50 0.406, p99 0.558**. The policy sits **0.20 above the
+floor** and is already paying at the ceiling in its top percentile.
+
+Lowering the floor changes the price in a region the policy never visits, so it predicts
+**NO EFFECT**. The binding edge is the CEILING. And lowering the ceiling is not a novel
+intervention: E12 introduced `feet_distance_max = 0.45` where none existed, stance fell
+0.67 -> 0.34-0.40, verdict WORKED -- the only reward change in this logbook with a positive
+verdict on its own target.
+
+I wrote E52's remedy from the shape of the corridor rather than from where the policy stands
+in it. Same error class as the check E52 itself was mocking: reasoning about an edge without
+measuring which edge is loaded.
+
+**THE FOUR "DEFECTS" WERE THE WRONG FOUR.** Decomposing the score exactly (group weights sum
+to 5.5; a band is worth `(1-score)/n_bands * group_weight / 5.5`), on best.pt's own row:
+
+| band | pp available |
+|---|---|
+| **left/right evenness (`gait_symmetry`)** | **18.18** |
+| double support | 13.64 |
+| vertical bounce | 9.09 |
+| foot slip | 7.55 |
+| torso upright | 6.06 |
+| stance width | 6.06 |
+| sideways drift | 4.55 |
+| speed tracking | 3.56 |
+| holding a heading | 1.84 |
+
+Total available 70.52 pp. **The four I named are 25.76 pp, 36.5% of it.** Symmetry alone is
+18.18 -- more than stance width and torso lean combined -- and it was not on my list at all.
+
+Three further corrections from the same audit, each measured:
+
+1. **`stride_length` is not a band in `gait_score` and is worth exactly 0.00 pp.** It is also
+   not an independent quantity: stride = speed / cadence, and cadence is already inside the
+   human band (debounced strike rate 1.995/s against 1.6-2.0). At 1.2 m/s the same cadence
+   gives 0.60-0.72 m unaided. E13 recorded this shape once already.
+2. **`double_support` is NOT caused by `stance_fraction 0.6`.** The drawn stance fraction
+   averages 0.6020, so the clock commands `2s-1 = 0.2039`, dead centre of the human band --
+   and is disobeyed asymmetrically: airborne-when-the-schedule-says-stance 0.1643 per
+   foot-step against loaded-when-it-says-swing 0.0524, a 3.1x under-contact bias. Obeying
+   pays +0.219/step against offsetting costs of order 0.01/step. This is E23's
+   optimisation-not-pricing shape, not a tuning error.
+3. **The four are not one posture.** Over a 4.1x held-speed sweep, stance width and torso
+   lean are speed-invariant (0.357-0.399 and 0.801-0.827, the latter IMPROVING with speed)
+   while double support and stride are speed-driven. Across 114 walking evals over both
+   seeds: r(torso_upright, stance_width) = -0.219, r(torso_upright, double_support) = -0.151,
+   r(stance_width, double_support) = -0.001. A shared brace predicts a wide stance WITH a
+   bent torso; the measured sign is the opposite.
+
+**And the dashboard's "Balance 0%", which I recorded yesterday as a suspected display defect,
+is not a defect.** It is the single largest scoring gap in the project, reading correctly.
+
+**Nothing launched.** The instrument was scoring the wrong policy, and a fifteen-hour run
+judged against it would have inherited that. Fix the instrument first is not a slogan here;
+it is the ninth, tenth and eleventh entries of the table above.
+
+### E52  2026-08-17  The reward FORBIDS a human stance, and the check written to catch that looked at the wrong end
+
+> **PARTIALLY RETRACTED by E53.** The diagnosis below is correct: the corridor and the
+> human band do not overlap. The lever it names is wrong. The policy sits at stance 0.399,
+> 0.20 ABOVE the floor, so lowering `feet_distance_min` prices a region it never visits and
+> predicts NO EFFECT. The binding edge is `feet_distance_max`. Read E53 first.
+
+**Measured, not argued.** `feet_distance` is a corridor `[feet_distance_min 0.20,
+feet_distance_max 0.45]` at weight -3.0. Human walking stance is 0.10-0.15 m, and
+`gait_score.py:74` scores **0.00** for anything at or above 0.20. The corridor and the target
+do not overlap:
+
+| stance | reward/step | gait_score band |
+|---|---|---|
+| 0.125 (human mid) | **-0.225** | **1.00** |
+| 0.150 | -0.150 | 1.00 |
+| 0.200 | 0.000 | 0.00 |
+| 0.330 | **0.000** | **0.00** |
+| 0.420 | 0.000 | 0.00 |
+| 0.670 | -0.660 | 0.00 |
+
+To score 1.00 on this project's own human-likeness band the policy must pay **0.225/step,
+6.4% of its ~3.5/step positive budget, forever**. Sitting at 0.33 costs exactly nothing. The
+policy is not failing to learn a narrow stance; it is correctly declining to buy one.
+
+This is the E33 class inverted. E33 found a success predicate that was **unsatisfiable** by
+construction. This is a target that is **actively penalised** by construction.
+
+**How it hid, and this is the part worth keeping.** The config carries a pre-registered check,
+written when `feet_distance_max` was added:
+
+> *"If the eval's `stance_width` still sits above 0.45 after this run, the term is still too
+> weak and that is the measurement that says so."*
+
+Measured: **0.331** in eval, 0.386-0.42 at a held 1.0 m/s command. The condition did not
+trigger. Read naively that is a pass -- the term pulled the stance down from the 0.67 brace
+of E12, so it worked. What actually happened is that the policy moved **inside** the corridor
+and the term stopped firing at all: `reward/feet_distance` reads **-0.032** and **-0.019** on
+the two live runs, i.e. essentially zero. The prediction was written against the corridor's
+UPPER edge while the defect lives at its LOWER one.
+
+Third time in three days that one of my own pre-registrations checked the wrong quantity
+(E51 had two: mean speed against a capability threshold). The pattern is specific enough to
+name: **a bar written against the failure mode you just fixed will not see the failure mode
+you created.**
+
+**Is the splay load-bearing?** E23's precedent says measure the counterfactual before touching
+a reward, so `scripts/stance_counterfactual.py` asks three separate questions of the trained
+policy, no training and no reward change:
+
+| question | result |
+|---|---|
+| does it ever narrow on its own? | **yes** -- 1st percentile 0.145 m, 0% falls |
+| does it survive starting narrow? | **yes** -- hips adducted 0.30 rad: 6% falls vs 0% baseline |
+| does it return to wide? | **yes** -- 0.327 -> 0.394 over 400 steps, drift +0.066 m |
+
+So the splay is a **preference, not a necessity**: nothing but the reward is pulling it there,
+and the reward pays exactly zero for it.
+
+**What this does NOT establish, stated because the temptation is to overclaim.** The
+intervention is weak -- the policy escapes the adducted start within ~50 control steps, and
+mean stance falls only 0.386 -> 0.336 at the strongest setting. So what was tested is survival
+of a TRANSIENT narrowing, not sustained walking at 0.125 m. **Whether a human-width stance is
+sustainable at speed on this body is unmeasured.** A run that assumes it is, is assuming
+something this project has not shown.
+
+**Also measured**: unperturbed at a held 1.0 m/s the stance is **0.386**, against 0.331 in
+eval. Eval averages over the command distribution; at a held command the policy drifts toward
+the corridor's ceiling. The term is not merely silent -- the policy is pressing against the
+top of what it is allowed.
+
+**Not changed yet, deliberately.** Lowering `feet_distance_min` is a REWARD change, and every
+reward change in this project has produced an exploit or NO EFFECT while both clean WORKED
+verdicts were optimiser changes. It goes with a pre-registration and a kill criterion on falls,
+after the exploit surface has been red-teamed -- not as "fix the number".
+
+### E51  2026-08-17  E50 VERDICT: **MIXED**. The exam is passed; three of my bars were unreachable by construction
+
+**Run**: `runs/final-s0-20260816-201017`, 11,393 iterations, 2.80 B env steps, 15.2 h. Ran its
+whole budget. No kill criterion fired.
+
+**Scored mechanically by `scripts/score_final_run.py`, whose thresholds are copied from E50
+and which reports BOTH clauses of every conjunction separately.** That second property is not
+decoration: I reported "P2 is passing" twice from the slope alone while the endpoint clause of
+my own prediction was failing, and only the script caught it.
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | `action_std` never exceeds 0.501 | **PASS**. Max 0.4966, pinned on the ceiling, final 0.379 |
+| 2 | PRIMARY: slope >= -0.10/1B **AND** last >= first | **FAIL**, split: slope **-0.048** [pass], endpoints 0.955 -> 0.766 [FAIL] |
+| 3 | Some eval with upright>=0.85 AND falls<=0.15 AND speed>=0.75 | **FAIL**. Never simultaneous |
+| 4 | mean_speed >= 0.85 and ratio >= 0.80 | **FAIL** on speed (0.661), **pass** on ratio (0.893) |
+| 5 | gait_score >= 0.40 at falls<=0.30 and speed>=0.60 | **FAIL**. Best qualifying 0.342 |
+| 6 | `amp_readiness.py` gates 1-3 | **PASS. All three. "VERDICT: ready for AMP"** |
+| 7 | Torso tilt < 30 deg | **FAIL**. 36.6 deg, from a baseline of 48.87 |
+| 8 | Seed spread < 3.0x | pending segment 2 |
+
+**2 of 7. And the run is nevertheless the best this project has produced, which is why the
+verdict is MIXED and not WORSE.** The exam that gates the entire next phase, and that has
+never once been passed, is passed:
+
+```
+speed tracking, deterministic          survival vs exploration noise (1.0 m/s command)
+ commanded  achieved  ratio  falls      noise std   falls  ep length  speed
+      0.50      0.42   0.84     0%           0.00      0%       1200   0.85
+      0.80      0.67   0.84     0%           0.50      0%       1200   0.87
+      1.00      0.85   0.85     0%           1.00      0%       1200   0.91
+[ok] stays up   [ok] no noise crutch   [ok] obeys speed        VERDICT: ready for AMP
+```
+
+The header of this file has read "AMP readiness: NOT ready. Passes 'stays up', fails 'obeys
+speed'" since E09. `best.pt` did 0.694 m/s at a held 1.0 m/s command, ratio 0.69, one point
+under the gate. This policy does **0.85 m/s at ratio 0.85 with 0% falls**, and it does not
+degrade when the exploration noise is removed, which is the check that catches a policy using
+its own noise as a controller.
+
+**THREE OF MY BARS WERE UNREACHABLE BY CONSTRUCTION, AND THAT IS THE ENTRY.** P3, P4 and P5
+are all stated on `eval/mean_speed`, which is an average over the COMMAND DISTRIBUTION. That
+distribution's median commanded speed is **0.731 m/s** (measured over the last 30 evals, max
+0.801). P3 asked for a mean of 0.75 and P4 for 0.85. **I set a speed bar above what the
+commands, on average, ask for.** A policy tracking its command perfectly at ratio 1.0 would
+score 0.731 and fail both. Meanwhile the same policy, asked for 1.0 m/s and measured at that
+command, delivers 0.851.
+
+That is E31b's rule turned on its author: *never compare a constant, compare the quantity it
+stands for.* I compared an achieved average against a capability threshold, and the two live
+in different spaces. The bars are not being moved -- E48's lesson is that weakening an
+acceptance bar to fit a result is the move this project has regretted every time -- they are
+recorded as **mis-specified**, which is a different admission and a worse one, because a moved
+bar is dishonest and a mis-specified bar was never a measurement at all.
+
+The correct form for a future run is a bar on the TRACKING RATIO at a stated command, which
+P4's second clause already had, and which passed at 0.893.
+
+**What the horizon actually bought, against the right baseline.**
+
+| | best.pt (envelope) | final-s0 | condition |
+|---|---|---|---|
+| torso_upright | 0.658 | **0.803** | held 1.0 m/s command |
+| speed | 0.694 | **0.851** | held 1.0 m/s command |
+| deterministic falls | fails the gate | **0%** | 1.0 m/s, 1200 steps |
+| torso tilt | 48.87 deg BACK | **36.6 deg BACK** | held 1.0 m/s command |
+| eval falls | 15.6% at a 1000-step limit | **9.4% median at 2500** | a 2.5x harder bar |
+| gait_score | 0.21 | **0.295** | best.pt's own eval row (E53: the 0.20 previously quoted was a different checkpoint) |
+
+**P2 is the honest disappointment.** The slope clause passed with room -- **-0.048/1B against
+a -0.659 baseline**, a 13.7x reduction, so the monotone collapse that ended every previous
+locomotion run is gone. The endpoint clause failed: 0.955 -> 0.766. Both are true and they
+describe one thing: the policy spent posture to buy speed early (0.312 m/s at 200M against
+0.765 at the end) and then held roughly flat rather than recovering. E50 named `gae_lambda`
+in advance as the residual **if P7 failed while P2 and P3 passed**; that antecedent did not
+occur, so the pre-registered conclusion does NOT fire and `gae_lambda` remains an untested
+suspicion rather than a finding.
+
+**Segment 2** (`configs/final_s1.yaml`, seed 1, byte-identical but for `run.name` and
+`run.seed`, verified by diff) launched automatically on segment 1's exit via
+`scripts/chain_segment2.sh`, which refuses to chain if segment 1 stopped short of 11,000 of
+11,393 iterations. It reached 11,393.
+
+### E50  2026-08-16  E49 VERDICT, and the last run goes to the track that was never configured
+
+**E49 scored against its own predictions.** Three arms, all supine, same five waypoints:
+
+| arm | rise budget | speed penalty | waypoint index | final pelvis | predicate |
+|---|---|---|---|---|---|
+| A | 3.75 s | on | time | 0.875 | 66% |
+| B | 5.5 s | off | time | 0.181 | 0% |
+| **C** | **5.5 s** | **off** | **PELVIS HEIGHT** | **0.181** | **0%** |
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | Height-indexing stands where arm B did not; predicate > 0% is the signal | **NO.** 0.181, 0%, identical to arm B to three decimals |
+| 2 | If it fails identically, the class explanation is INCOMPLETE, not confirmed in reverse | **TRIGGERED.** This is the entry |
+| 3 | The report names the arm being compared against | held: arm B |
+
+**VERDICT: the closed loop bought nothing, and prediction 2 says what that means.** E49 wrote
+down in advance that an identical failure would NOT confirm the "open-loop schedules cannot
+rise slowly" story, because height alone says nothing about which way the body is tipping.
+That is the honest reading and it is the one recorded here. Arm C's own numbers say the
+feedback never engaged: peak pelvis 0.640, *below* arm B's 0.857, so height-indexing did not
+merely fail to correct the deviation, it explored a worse region.
+
+**What is now established, and it closes a branch.** Across E47-E49 the reference has been
+attacked four ways: reversed descent (unexecutable, E47), hand-authored rising waypoints
+(0 of 1200), open-loop CEM search (a ballistic kip-up, 66%, blocked on "not ballistic"), and
+now the cheapest closed loop. **No usable get-up reference clip exists.** `configs/getup.yaml`
+still trains 30% of its episodes against `getup_refs_v1.npz` at `w_track: 2.0` — a film E47
+measured as unperformable. That is not a tuning problem, and no further generation count
+fixes it.
+
+**Then the audit turned to the other track, and found the actual headline.**
+
+```
+$ .venv/bin/python scripts/oracle.py --config configs/default.yaml
+2 contradictions, 0 unreachable, 1 suspect, 8 ok
+$ .venv/bin/python scripts/oracle.py --config configs/getup.yaml
+0 contradictions, 0 unreachable, 1 suspect, 12 ok
+```
+
+**Both contradictions are findings this project already made, and then applied to the get-up
+config only.** `gamma: 0.99` at 125 Hz is the 0.80 s horizon of E31, against a 1.111 s gait
+cycle — one full cycle discounted to 0.2476. `log_std_max: 5.0` is the non-ceiling of E30,
+which cost that run 833 -> 19 in eval return. E30 and E31 are the **only two clean WORKED
+verdicts in this logbook**, and neither was ever carried across to the config the README says
+the project is for. The locomotion track has never once been trained under a configuration
+its own invariant checker accepts.
+
+It is visible in the run that produced the current `best.pt`. Over 5,086 iterations
+`action_std` climbed 0.389 -> 1.447, r(iteration) = **+0.954**, while `torso_upright` fell
+0.961 -> 0.543, r(action_std) = **-0.851**. Best is iteration 3,100; every eval after it is
+worse. The file's own comment at `default.yaml:79-87` measures that std 1.0 destroys 49% of
+the reward and argues for std 0.50 — and the line directly beneath it sets 5.0.
+
+**Nothing in `train.py` had ever called the Oracle.** `scripts/oracle.py` has exited 1 on a
+contradiction since E11 specifically so it could gate a launch, and it only ever gated the
+launches someone remembered to run it before. Now fixed: `Trainer._gate_on_oracle` refuses to
+start, overridable only by `HUMANOID_SKIP_ORACLE=1`, which prints loudly.
+
+**Three more live defects, none of them logged before, all fixed:**
+
+| defect | mechanism | why it matters over days |
+|---|---|---|
+| **One NaN reward destroys the whole batch** | `vec_env.py:668` computes reward BEFORE its own isfinite guard at `:677`. GAE spreads it down the rollout; `advantages.mean()/std()` then converts all 4096 envs. Measured: 1 NaN in 1 of 8 envs on 1 of 4 steps -> 3/32 advantages -> **32/32** after normalisation | `is_best = NaN > best_return` is False forever after, so no further `best.pt` is written and the run burns the remaining days looking healthy |
+| **Checkpoints written in place** | `torch.save(..., path)`, and `--resume` loads `sorted(glob("iter_*.pt"))[-1]` — exactly the file an interrupt truncates. `best.pt` IS the deliverable | a laptop run of this length will be interrupted |
+| **The Task's RNG was rebound per env** | `init_state` did `self._rng = rng`, and ONE task object is shared by the train, eval and render envs, so it pointed at whichever was built last. After the first video, training's command redraws consumed the render env's stream | two evaluations of two checkpoints are not comparable, which is the assumption best-checkpoint selection rests on |
+
+**THE FINAL RUN.** Locomotion, `configs/final.yaml`, oracle-green (0 contradictions, 10 ok).
+Three segments of ~14.6 h; measured at full scale before launch, 53,178 sps and 4.62 s per
+245,760-step iteration. Segments 1-2 are locomotion at seeds 0 and 1. Segment 3 is the
+reduced get-up "catch-and-hold" — rise from a validated mid-rise state and hold — chosen by
+the user over a fourth locomotion seed, and it will be reported as fall recovery from a
+crouch, not as standing up off the floor.
+
+Ten changes, and **not one of them is a reward weight**. Every locomotion win in this logbook
+is about what is COMMANDED or how it is OPTIMISED (E14 envelope, E13 cadence, E12 stance,
+E30 exploration, E32 discount); every reward change produced an exploit or NO EFFECT.
+
+| key | old | new |
+|---|---|---|
+| `ppo.gamma` | 0.99 (0.80 s) | **0.997** (2.67 s, 2.4 gait cycles) |
+| `ppo.horizon` | 24 (0.192 s) | **60** (0.48 s; also holds `gamma^horizon` at 0.835) |
+| `ppo.num_minibatches` | 4 | **10**, keeping the minibatch at 24,576 so horizon moves alone |
+| `ppo.log_std_max` | 5.0 (std 148) | **-0.70** (std 0.4966) |
+| `network.init_noise_std` | 0.8 | **0.45**, below the ceiling, because starting above a clamp is E05 |
+| `task.difficulty_init/min` | absent -> 0.75 | **1.0** (at 0.75 the median command is 0.529 m/s, a crawl the oracle cannot see because its check hardcodes 1.0) |
+| `run.total_env_steps` | 500M (**2.84 h**) | **2.8B** (14.6 h) |
+| `log.keep_last_checkpoints` | 5 (4.4% of the run) | **200** |
+| `eval.num_episodes` | 32 | **64**, which is what the evaluator already produced |
+| 4 dead task keys | present | **deleted** (read by nothing; `reward_batch` still uses one shared error) |
+
+`entropy_coef` stays **0.01**, against the first draft. The comment above it argues for zero
+on the grounds that a ceiling is "a gradient sink" — which is E05's mistake restated, since
+`clamp_log_std()` runs in place after every optimiser step and E30 verified exactly that
+distinction. `gae_lambda` stays 0.95 and is **the largest known defect left in the file**:
+credit for observed reward decays over 0.151 s here against ~0.333 s at the references, the
+same rate-copy class as gamma. One novel high-variance lever is enough for a last run.
+
+**Pre-registered, before launch:**
+
+1. **P1 is a GUARD, not a test, and saying so in advance is the point.** The 12-iteration
+   smoke run already measured `action_std` falling 0.447 -> 0.408 under this config, so the
+   ceiling is not expected to bind. **FALSIFIED IF** `action_std` exceeds 0.501 anywhere,
+   which would mean the clamp is not running — kill instantly, do not debug live.
+2. **PRIMARY: the degradation stops.** Slope of `eval/torso_upright` from 200M steps to the
+   end is >= **-0.10 per 1B steps**, and the final eval is >= the 200M eval. Baseline:
+   **-0.659 per 1B**, 0.961 -> 0.543, never recovering.
+3. **The deliverable posture, never once met**: some eval reaches `torso_upright >= 0.85`
+   AND `fall_rate <= 0.15` AND `mean_speed >= 0.75` m/s **simultaneously**. Best.pt is
+   0.726 / 0.156 / 0.589 — and its 0.156 was at a 1000-step limit, not 2500, so fall rate
+   here is a 2.5x harder bar and is **not comparable to any earlier number**.
+4. **Human-likeness with a speed floor.** `gait_score` overall >= **0.40** at an eval with
+   `fall_rate <= 0.30` **AND `mean_speed >= 0.60` m/s**. The speed conjunct is not
+   decoration: scoring all 618 complete eval rows in `runs/`, 0.4418 has *already* been
+   reached at fall 0.062 — by a **0.319 m/s crawl**. `gait_score` has no absolute-speed
+   band, so it is maximised by walking slowly, which is E14's failure mode wearing the
+   project's own headline metric. Without the conjunct this prediction is vacuous.
+5. **The backward lean, the boldest and least-supported.** `posture_score.py --command 1.0`:
+   tilt < **30 deg** and backward share < 90%. Re-measured today: **48.87 deg, backward in
+   100.0% of samples**. Honest in advance: of three live explanations I fix one fully (E25's
+   actuator-order bug — **no locomotion policy has ever been trained since that fix landed**),
+   one partially (the horizon, but not `gae_lambda`), and leave E23's third untouched. If 5
+   fails while 2 and 3 pass, the pre-registered conclusion is that `gae_lambda` is the
+   remaining half of the rate-copy bug, and that is the entry to write.
+6. **The project's own exam**: `scripts/amp_readiness.py` passes gates 1-3.
+7. **The seed hedge is a hedge, NOT a test.** E22b's 7.6x bifurcation was measured on a pair
+   that *already ran* these low-noise exploration settings, so the question "does the
+   attractor survive the exploration fix" is answered — it does. Segment 2 exists to buy a
+   second draw, not to learn something.
+
+**Kill criteria, and the thresholds are calibrated on COLD starts.**
+
+- **K1, at 100M steps (iter 407, ~32 min):** training `episode_length` < **300**. The two
+  genuinely cold locomotion runs read 471.1 and 377.7 at this point; the 1000-step figure in
+  the first draft came from two runs that were both *warm-started*, and would have aborted
+  every seed 32 minutes in. Early episode length is set by time-to-fall, not by the
+  truncation limit, so raising the limit to 2500 does not raise it.
+- **K2, at 500M steps:** `action_std` < 0.10 AND median `eval/episode_return` over the last
+  5 evals < 1500. Relaunch that seed with `entropy_coef: 0.005`.
+- **K3, at 1.0B steps:** median `eval/fall_rate` over the last 10 evals > 0.60 **AND**
+  median `eval/torso_upright` < 0.60. **Both required.** Fall rate alone fires on the
+  baseline, which oscillated 12.5-96.9% with no trend (sd 0.215).
+- **K4, the anti-rescue rule:** if segment 1 finishes without satisfying prediction 3, do
+  NOT re-tune and do NOT relaunch it. Run segment 2 as configured. E44 pre-committed to a
+  decision point and E45/E46 then made two more parameter changes after it.
+- **K5, hard stop on scope:** no mid-run config edit. `--resume` reloads the config file and
+  skips re-snapshotting it, so a resumed run's directory would advertise a configuration it
+  is not running. If something must change, it is a new run directory.
+
+### E49  2026-08-16  E48 VERDICT: failed, and the pre-registered fix would have been wrong
+
+**E48 scored against its own predictions:**
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | PRIMARY: a family reaches predicate >= 90% | **NO.** All four at 0%, final pelvis 0.181 |
+| 2 | Peak rise speed below 1.0 m/s in the winners | N/A, no winners |
+| 3 | Risk: penalty makes standing unreachable; respond `--w-rush 0.5` | **TRIGGERED, and the response was wrong** |
+| 4 | Watch for slow rise then slow topple | **YES**, that is exactly what happened |
+| 5 | Nothing trained until replayed and looked at | held |
+
+**Prediction 3 is the entry.** The pre-registered response was to halve the speed penalty. The
+arithmetic said otherwise before any of it ran (the penalty costs ~0.45 where a stand pays
+~5.3, twelve times smaller), so instead of applying the fix, a two-arm experiment on the same
+start pose separated the two changes E48 had made together:
+
+| arm | rise budget | speed penalty | final pelvis | predicate |
+|---|---|---|---|---|
+| A | 3.75 s | **on** | **0.875** | **66%** |
+| B | 5.5 s | **off** | 0.181 | 0% |
+
+**The speed penalty is not what killed it. The rise budget is.** With the penalty on and the
+short budget the kip-up came back and scored 66%, statistically the same as the 65% it scored
+with no penalty at all. With no penalty and the long budget, nothing stands.
+
+Had the pre-registered response been applied without checking, it would have halved a
+coefficient that was never binding, produced another failure, and pointed at the acceptance
+bar next. **Pre-registration protects against fitting the story to the result. It does not
+protect against a wrong causal model, and this is the first time in this logbook that a
+pre-registered response has been overruled by measurement rather than by argument.**
+
+**Why the budget is what matters, and it is not a tuning fact.** Arm B did reach pelvis 0.857
+transiently and then ended at 0.181. It is not that the body cannot rise slowly; it is that it
+cannot rise slowly AND STAY. Between lying and standing the body passes through postures where
+a deviation grows on its own. A schedule of servo targets indexed by TIME has no way to notice
+a deviation, let alone correct one, so its only route across that region is to cross it faster
+than the deviation grows. Give it more time and the deviation wins.
+
+That is a property of the SOLUTION CLASS. It says an open-loop search cannot produce a
+human-like get-up reference at any compute budget, which retires the whole "search harder"
+branch, and it says nothing whatever about the humanoid.
+
+**E49 test, one variable against arm B**: same 5.5 s budget, same zero penalty, same five
+waypoints, but the commanded waypoint is chosen by CURRENT PELVIS HEIGHT instead of elapsed
+time (`--by-height`). Slip back down and the command rewinds; get ahead and it moves on. That
+is the cheapest possible closed loop, and it is a direct test of the class explanation rather
+than of a coefficient.
+
+**Pre-registered, and this time the causal claim is stated so it can be wrong:**
+1. **If the class explanation is right, height-indexing stands where arm B did not**, at the
+   same budget and with no speed penalty. Predicate > 0% is the signal; >= 90% is the win.
+2. **If it fails identically at 0.181**, the class explanation is INCOMPLETE, not confirmed in
+   reverse: height alone may be too weak a feedback signal (it says nothing about which way
+   the body is tipping). The response is a richer feedback signal, not more generations.
+3. Whatever happens, the report says which arm it is being compared against. E48's failure
+   was legible only because arm A existed to compare it to.
+
+### E48  2026-08-16  The body CAN stand up. It just does it like a gymnast.
+
+**The first complete search answered the question this project could not answer in sixteen
+training runs: yes, this body can get off the floor.** All four starting orientations, cold
+start, no reference, no reward tuning.
+
+| start | final pelvis | standing predicate, over the hold |
+|---|---|---|
+| supine | 0.875 | 65% |
+| prone | 0.875 | 74% |
+| side_left | **0.877** | 79% |
+| side_right | 0.874 | 68% |
+
+Standing height is 0.877. Sixteen training runs never passed 0.417 from the floor.
+
+**All four were REJECTED by the 90% acceptance bar, and the script then printed "NO FEASIBLE
+GET-UP FOUND", which contradicted its own data.** That sentence was written for the case where
+nothing leaves the floor, and it fired on the case where everything reached standing height.
+Fixed: the two outcomes now print different conclusions, because "the body cannot" and "my bar
+is strict" are findings about completely different things and confusing them is how this
+project has repeatedly talked itself out of results it already had.
+
+**What the frames showed, which no metric did.** The rise, supine:
+
+| t | pelvis |
+|---|---|
+| 3.3 s | 0.21, still on the floor |
+| 3.9 s | 0.86, standing |
+
+0.65 m in 0.6 s. That is a KIP-UP, not a get-up. The per-conjunct table agrees precisely:
+"13 not ballistic" held 66% where every other clause held 80-100%, so the residual whip is
+exactly what fails the predicate. The flight penalty never fired, because a kip-up keeps one
+foot planted; what makes it inhuman is the rate, not the airtime.
+
+**Confirmed by accident, and worth keeping.** Replaying the same waypoints stretched from a
+3.75 s ramp to 5.5 s left the body flat at pelvis 0.085 instead of standing at 0.875. The
+solution was purely ballistic: remove the speed and nothing remains. That accident also
+exposed an instrument bug (the replay read timings from the current source rather than from
+the search that produced the parameters), now fixed by storing timings, start pose and
+penalty settings inside the parameter file.
+
+**E48 change, four things, one intent: price the RATE.**
+1. `rush`: root linear speed above 0.6 m/s, plus angular above 1.8 rad/s at 0.15 weight,
+   accumulated over the WHOLE trajectory, weight 1.5. The only term that prices "how fast".
+2. Segment length 0.75 s -> 1.1 s. A short rise window makes the explosive solution cheapest.
+3. Hold 1.5 s -> 2.5 s, so a residual whip cannot run out the clock.
+4. Start pose and timing saved with the parameters, so a replay is a replay.
+
+**Pre-registered predictions:**
+1. **PRIMARY: at least one family reaches standing predicate >= 90% of the hold**, i.e. an
+   accepted clip. The rise is now allowed 5.5 s, which is longer than a person takes.
+2. Peak root speed during the rise falls below 1.0 m/s in the winners. (The kip-up's own
+   number is unavailable: the constants changed before it was measured, and reverting them to
+   recover a number I already know the sign of is not worth the wall-clock. Stated as a gap
+   rather than quietly dropped.)
+3. **Risk, stated up front**: the speed penalty may make standing unreachable and all four
+   families plateau below pelvis 0.5. If that happens the response is `--w-rush 0.5`, NOT
+   lowering `--min-stand-frac`. Weakening the acceptance bar to fit the result is the move
+   this project has regretted every time.
+4. **Failure mode to watch**: a slow rise followed by a slow topple. It satisfies the speed
+   budget honestly and fails the predicate anyway. Diagnosed by clause 1 or 7 leading the
+   blocker table instead of clause 13.
+5. Nothing is trained against any clip until it has been replayed frame by frame under its own
+   saved timings and looked at by a person (E47's standing instruction).
+
+### E47  2026-08-16  The reference was unexecutable. Stop authoring, start searching.
+
+**E42-E46 VERDICT: INVALID at the source.** All four runs imitated a reference film that no
+controller can perform. The film was built by recording a scripted DESCENT (stand -> squat ->
+seated -> supine) and reversing time, on the argument that a reversed feasible trajectory is
+feasible. That argument is wrong, and the measurement is not close: commanding the reversed
+film's own joint angles as servo targets, starting from its own first pose, the pelvis went
+**0.094 -> 0.111 while the film went 0.095 -> 0.879**, falling 0.18 m behind by 23% of the
+way through. Descending is gravity-assisted. Rising fights gravity with the same actuators.
+
+This voids E46's headline number. Film distance median 0.99 was a real measurement of a
+meaningless quantity: the policy rode 99% of a film's phase while staying ~15 cm below it,
+which is the only thing available to a policy chasing an impossible target.
+
+**Second attempt, also failed, and this one is the useful failure.** Authoring the film by
+RISING instead (waypoint families tuck -> squat -> half -> stand, ramped servo targets from a
+bank lying pose, accepted only if the pelvis ends >= 0.82 after a settle): **0 clips in 1200
+attempts, best pelvis 0.181.** Hand-designed waypoints do not stand this body up.
+
+**The change: `scripts/search_getup_trajectory.py`.** Stop authoring a reference; search for
+one. Cross-entropy method over open-loop servo-target trajectories (5 waypoints x 28 joints,
+each ramped over 0.75 s, in the env's own [-1,1] action units, through the env's own filter
+and decimation so anything found is reproducible by a policy), then a 1.5 s hold at the
+nominal stand where the body must stay up on its own. Either a feasible get-up exists and the
+search finds it, or a serious search fails and THAT is a finding about the body, measured
+rather than assumed after each new reward idea.
+
+**What the first searches established, which nine months of reward engineering did not:**
+
+| | |
+|---|---|
+| First random population, peak pelvis | 0.641 |
+| After 22 generations, pelvis at the end of the hold | 0.722 |
+| After 33 generations (run 2), pelvis at the end of the hold | **0.874** |
+| Standing height of this body | 0.877 |
+| Best the policy ever reached from the floor, 16 runs | 0.417 |
+
+The body can be stood up. That was never in evidence before.
+
+**Three defects found in the search itself, all fixed, two of them the project's own
+recurring classes:**
+
+1. **CEM converged its own sampler, not the problem.** Sigma fell 0.70 -> 0.17 by generation
+   20 and the next 20 generations resampled one basin. Fixed with injected exploration noise
+   decayed over the run.
+2. **A plain elite mean cannot be moved by one outstanding sample.** The 0.874 candidate sat
+   inside an elite of 76 whose mean final height was 0.127, so the sampler kept drawing
+   around a posture its own champion had already beaten. Fixed with CMA-ES-style rank
+   weights plus a reseat-on-the-champion after 8 stale generations.
+3. **The score was gamed by a jump, caught live.** Generation 44 held a champion at pelvis
+   0.874; generation 50 replaced it with one at 0.235 whose peak was **1.017, above the 0.877
+   standing height, therefore airborne**. Mean pelvis height over the hold is earnable by
+   flight. This is the same class as exploits 1-10 and it appeared within an hour of writing
+   a fresh objective. Fixed three ways at once: the MINIMUM height over the hold carries the
+   weight (a body that leaps and collapses has a low minimum however high its mean), the peak
+   term is capped at standing height so exceeding a stand buys nothing, and flight time (both
+   feet clear of the floor) is subtracted outright.
+
+**Acceptance is the task's own 13-conjunct standing predicate at the hardest exam level, true
+for >= 90% of the hold.** Not a height. Height thresholds in this project have been satisfied
+by a headstand and by knees locked backwards; the predicate rejected both.
+
+**Standing instruction that follows from E47**: a reference clip is never trained against
+until it has been executed, frame by frame, by the same servos the policy will use, and
+looked at by a person. The executability test costs seconds and its absence cost four runs.
+
+### E34  2026-08-15  PRE-REGISTERED BEFORE RESULTS: the reward, rebuilt as one package
+
+**Run**: `runs/getup-20260815-165218` (second attempt; the first,
+`runs/getup-20260815-161332`, was killed at iteration ~400 by the pre-launch review's
+follow-up, see the addendum below). Written before any result.
+
+**ADDENDUM, same day.** The adversarial review of the implementation (5 angles, 0 blockers)
+measured ONE important defect on the live first attempt and it forced a restart:
+**synchronized episode boundaries starve the standing starts.** With no early termination
+every env truncates on the same step, so the 30% standing resets arrived as a wall once per
+~104 iterations; `reward/stand` was exactly 0.0 in 332 of 349 iterations, each wave spiked
+KL to 0.09-0.18 against the 0.01 target (slashing the LR), and by the third wave the trained
+policy destroyed a standing pose within one iteration. The mechanism the 30% exists for
+never engaged. Fix: `stagger_initial_episodes` (random initial episode phase per env,
+training env only; a staggered EVAL env would bias every episode metric). Verified: 256 envs
+over 60 steps produce 6 single-env truncations (the exact expected trickle) instead of one
+256-env wall, and the progress line's `ret` now updates live instead of freezing for 104
+iterations. Review also fixed: `getup_conjuncts.py` used RAW foot force for clauses 7-8
+(over-reported 405 vs 317 steps on the E32 launch policy; now height-masked like the
+predicate), `getup_snapshot.py` printed unmasked force and a max over all 28 joints as
+"knee" (now masked, and the actual knees), constructor guards against inverted/degenerate
+corridor edges (smoothstep would NaN silently), preflight's watched-metrics list extended
+with the E34 surface, and the watch table now prints `gate%` and `ovspd%`.
+Review verdicts otherwise: independent pose-table rebuild CONFIRMS the ladder is monotone
+(stand nets +5.39/step, kneeling pays at or below the floor, slow pumping nets 0.043/step
+and loses to parking, parking loses to climbing, so the gradient points up everywhere);
+no reward exploit found across seven attack angles; the latch is ornamental (~4% of the
+carrot; w_stand+w_hold do the work); the floor gradient is carried by the shaping
+(~2-3 sigma when sustained across a horizon), the lift term only engages above 0.35 BW.
+
+**The package** (adversarially designed: 4 designs x 2 attackers x critic, plus the user's
+force mechanism; every element traced to a measured exploit):
+
+| Change | Kills |
+|---|---|
+| `upright` and `rise` DELETED; one dense `lift` term: height of min(pelvis, head) through a force corridor | E32 curl (orientation paid lying down), E29 headstand |
+| corridor opens 0.35-0.75 BW, **closes 1.6-2.4 BW** | E33 feet-press-lying (1.0+ BW supine), jump take-offs (2.5-6.2 BW) |
+| foot force HEIGHT-MASKED everywhere (feet above 0.10 m read zero) | 13 BW mid-air sensor ghost |
+| `stand` 3.0/step behind U with soft quality [0.6, 1.0] | stillness-as-gate bugs (shipped twice) |
+| `hold` seniority 0->2.0 linear over the 2 s | jump-flash standing instants (E33) |
+| `latch` 40 once, on hold completion | visible only at gamma 0.9985 (E31's lesson) |
+| penalties damped 10x on the floor | E32 corpse selection (struggling cost more than stillness) |
+| `launch` fine: upward root velocity above 1.0 m/s, quadratic | 5 m/s ballistic get-up; 1.0 m/s = a 5 cm hop = the user's stated tolerance |
+| shaping phi = lift, shaping_gamma = ppo.gamma, weight 150 -> 60 | E31 pump (58% of signal) |
+| 3 task observations: per-foot force, pelvis height | the policy was graded on instruments it could not see |
+| standing_reset_frac 0.15 -> 0.30 | the big salary was rumour: never once experienced in 13 runs |
+
+**Verified before this entry**: pose table (STANDING 3.697/step; supine, prone, side, seated,
+E32 curl, E32/E31 launches ALL at or below -0.006, the curl's pressed feet closed out by the
+corridor); preflight 17/17; Oracle **zero contradictions** (first time); 67-iteration smoke,
+all 7 terms logged, obs 95 -> 98 through the real trainer, mirror confirmed off for getup.
+
+**Pre-registered predictions:**
+
+1. **Floor reward is near zero and NEGATIVE early.** Expected, not a failure signal. The
+   floor is deliberately silent; early eval return ~-50 (drain + penalties) is by design.
+2. **`gate_frac` and `launch_overspeed_frac` are the watch metrics.** Jumping dying =
+   overspeed fraction falling from E33's ~60% toward single digits.
+3. **PRIMARY: `standing_frac` > 0 by iteration 2000** (now reachable AND priced: 5.0/step
+   behind U against a floor of ~0). Secondary: `held_ever_frac` > 0 by 2500.
+4. If the policy parks (crouch or kneel, never completing U), the pre-registered response is
+   the reset distribution (mid-rise poses into the bank), NOT a new reward term. Adding
+   terms is how exploits 1, 2, 4, 5, 7 and 10 shipped.
+5. `action_std` at or below 1.00 throughout (E30 cap).
+
+**Known accepted risks, stated up front**: the floor's dense dynamic range is ~0.003/step,
+possibly too flat for PPO to find the rise without mid-rise resets (response pre-registered
+above); a near-stand failing one conjunct collects lift ~0.59/step forever (watch `foot_sep`,
+`knee_max`); the latch is 40 sigma-ish in advantage terms on the step it fires (GAE and value
+clipping absorb spikes, and it fires at most once per env per episode).
+
+### E35  2026-08-15  PRE-REGISTERED: the ladder deployed. E34's verdict on the way in.
+
+**E34 verdict (run getup-20260815-165218, stopped at iteration ~1080): MIXED, leaning
+worked-as-designed.** Scored against its pre-registration:
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | floor near zero, negative early, by design | YES: returns -50 to +80, no exploit ever paid |
+| 2 | ovspd% falls = jumping dies | **YES, immediately: 0.0-0.8% on every eval vs E33's ~60%. The launch fine plus closed corridor killed ballistics outright.** |
+| 3 | standing_frac > 0 by 2000 | NO by 1050: 0.0% on all 21 evals |
+| 4 | if parked: reset distribution, not a new term | **TRIGGERED at 1050** (parking stable from ~450, 600 iterations, pelvis 0.09-0.16, std quieting 0.75 -> 0.42) |
+| 5 | std at or below 1.00 | YES: 0.42-0.75 throughout |
+
+The reward no longer pays ANY cheat (jumping, curling, pressing, all dead: the best the
+policy found on the floor was "lie still at ~0/step"), but the floor's honest slope alone
+did not pull PPO up the ladder within 1000 iterations. That is exactly the accepted risk
+E34 stated up front, with exactly the response it pre-registered.
+
+**E35 change, two yaml lines**: `bank_path: bank_v2.npz`, `midrise_reset_frac: 0.25`.
+Resets now: 30% standing, 25% ladder rungs (all-fours / kneel / half-kneel / squat /
+crouch, mined as physical equilibria, LOGBOOK E34b), 45% floor. Success still counted ONLY
+from genuine floor starts.
+
+**Pre-registered predictions for E35:**
+1. **Rung starts collect `lift` immediately** (crouch pays ~0.16/step through an open
+   corridor), so `reward/lift` batch mean jumps 10-100x from E34's ~0.0005.
+2. **standing_frac > 0 by iteration 1500**: a crouch start is 2 rungs from a stand, and the
+   critic now tastes those states every batch.
+3. The gradient chain runs downhill: crouch envs learn stand -> squat envs learn crouch ->
+   floor envs learn to reach a squat. Watch `eval/root_height` masked on floor starts LAST;
+   it moves only after the upper rungs are mastered.
+4. Failure mode to watch: rung starts collapse instantly under the noisy policy (like the
+   standing starts did early), delivering nothing. Check `reward/lift` in the first 100
+   iterations; if it is NOT elevated vs E34, the rungs are dying before paying and the fix
+   is a shorter settle horizon on the rung poses, not more of them.
+5. std at or below 1.00 (E30 cap), unchanged.
+
+### E44  2026-08-16  The imitation was assembled without two of its standard parts
+
+**E43 verdict: WORKED as a fix, insufficient as a run.** Making the reference observable
+did exactly what it should: `track` climbed monotonically 0.012 -> 0.088 across twelve
+100-iteration windows with no reversals (E42, blind, sat at 0.005-0.009 and oscillated). But
+the user called it: the outcome had not moved, and the arithmetic says why.
+
+**What track 0.088 means physically.** The term is `2.0 * exp(-err_sq / 2.0)`, so:
+
+| paid | joint error |
+|---|---|
+| 0.088 (E43's level) | 27.1 deg per joint |
+| 1.000 | 12.7 deg |
+| 1.800 | 5.0 deg |
+
+and the slope where the policy actually lives:
+
+| joint error | our kernel paid | at sigma^2 = 8 |
+|---|---|---|
+| 30 deg | **0.043** (2% of max) | 0.766 |
+| 20 deg | 0.363 | 1.306 |
+| 15 deg | 0.766 | 1.573 |
+
+The policy sat at 27 deg, i.e. on a slope 2% of the term's height. It was climbing, on a
+gradient too flat to finish inside any budget we have. **The kernel was mis-sized, not the
+idea.**
+
+**And the part that was simply missing: early termination on tracking failure.** An env
+that lost the film in its first second kept running the remaining ~2400 steps collecting
+nothing, so most experience was gathered far from the reference. Terminating on deviation
+has been standard since DeepMimic for exactly this reason, and we had none: `terminated_batch`
+was a NaN guard, by a deliberate decision made when falling was the only thing that could
+end an episode.
+
+**E44 changes, both standard, both measured before launch:**
+- `track_sigma_sq` 2.0 -> 8.0.
+- `track_fail_err_sq` 12.0 (|dq| ~ 37 deg/joint): film-riders terminate on drift; nothing
+  else ever terminates. Verified: 26 film terminations and **0** non-film terminations over
+  400 idle steps.
+- **Second-order defect caught in that same verification**: with early termination a film
+  episode lasts seconds while an ordinary one lasts 20 s, so returning lost riders to the
+  ordinary 30% draw starved the tracking population (measured 69 -> 29 on-film envs in 400
+  steps, still falling). Lost riders now respawn ON the film; population holds at ~15% of
+  envs, and the residual decline is by design (clips that play to the end hand off to the
+  standing salary).
+
+**Run**: `runs/getup-20260816-141541`, warm start from E43 iter_00001300 (observation width
+unchanged, so the warm start is valid). First 50 iterations read `track` 0.20, already 2.3x
+E43's endpoint.
+
+**Pre-committed decision point, not to be softened**: if `track` has not reached **0.8**
+(14 deg/joint, recognisable imitation) within 2500 iterations, imitation is declared a dead
+end for this project and the next move changes the problem statement, not another parameter.
+
+### E43  2026-08-16  E42 VERDICT: INVALID (unobservable objective). The fix, and a near miss.
+
+**E42 stopped at ~2100. Verdict INVALID, not "worse": the term it was built around could not
+be learned by construction.** `reward/track` crept 0.005 -> 0.009 of a possible 2.0 over
+2000 iterations. The diagnostic (all envs spawned on the film, deterministic policy):
+
+| step | joint err² | \|dq\| rad | film pelvis | body pelvis | track |
+|---|---|---|---|---|---|
+| 0 | 0.000 | 0.000 | 0.144 | 0.144 | 1.000 |
+| 30 | 3.422 | 0.350 | 0.146 | 0.151 | 0.197 |
+| 200 | 7.551 | 0.519 | 0.341 | 0.165 | 0.006 |
+| 600 | 24.236 | 0.930 | 0.479 | 0.164 | 0.000 |
+
+The spawn is exact, and 0.24 s later the body is already 0.35 rad/joint away. **The policy
+never sees the reference.** Its 98 observations carry joints, velocities, gravity, foot
+forces and pelvis height, and nothing about which film is playing or what pose is due.
+Every imitation system since DeepMimic feeds phase and target pose; without them a tracking
+term is a lottery, and no weight fixes that. This is E34's lesson repeated on a new term:
+**a reward may only depend on what the policy can observe.**
+
+**E43 fix**: `task_obs_dim` 3 -> 33 when a reference bank is loaded: an on-film flag, the
+phase, and 28 target-minus-current joint deltas (a control error, not an absolute pose the
+policy would have to difference itself). Off-film envs get an all-zero block, disambiguated
+from perfect tracking by the flag.
+
+**Caught before launch, and it would have wasted the whole run**: `ThreadedVecEnv` read
+`task.task_obs_dim` BEFORE calling `configure_for_prepared`, so a task whose width depends
+on data loaded during configuration reported its unconfigured width. The reference channels
+would silently not have existed while `observe_batch` wrote into a too-narrow buffer.
+Configuration now happens before the width is read. Verified end to end: obs_dim 95 -> 128,
+flag exactly 1.0 on-film and 0.0 off, phase spans 0.002-0.987, deltas exactly 0 at spawn
+(the spawn IS the reference) and grow to 0.247 mean after 60 idle steps: the gap the policy
+is paid to close is now visible to it.
+
+**Also fixed while verifying** (a dashboard defect with the same shape): the console's
+evaluation panels were empty because the trainer writes eval results INTO the training row,
+and the API split rows with `if/elif`, so every eval row was swallowed. Both the get-up
+series and the cross-run compare endpoint were affected.
+
+**Run**: `runs/getup-20260816-131918`, COLD start (the observation width changed, so no warm
+start is possible). Predictions: (1) `reward/track` rises by orders of magnitude, not
+percent: the first 50 iterations already start at 0.295 before the untrained actor spoils
+it; (2) film-riders complete level-0 holds at the film's end, the ladder promotes; (3)
+PRIMARY: `standing_frac_strict` > 0 and the first full floor-to-stand-to-hold; (4) failure
+mode now genuinely testable: if track saturates near 2.0 while floor starts stay at zero,
+the policy has learned to be a puppet on-film and nothing off it, and the response is to
+lower `track_reset_frac` and lean on the salary.
+
+### E42  2026-08-16  PRE-REGISTERED: full-reference imitation, the conceptual change
+
+E41 (EMA promoter) was cut short at ~2300 by the user's verdict on the whole approach, and
+the verdict was fair: skill fragments kept accumulating (E41@2100 probe: 17/80 deterministic
+level-hold completions, rung hold streak 90, both records) but no full floor-to-stand ever
+appeared, because no mechanism ever taught the SEQUENCE. Twenty runs of reward shaping
+cannot substitute for the thing every published get-up system uses: a motion reference.
+
+**The reference, synthesized without mocap** (`scripts/generate_getup_reference.py` ->
+`data/fallen/getup_refs_v1.npz`): record a gentle scripted DESCENT stand -> squat -> seated
+-> supine (servo ramps between bank anchors; per-stage retries from state snapshots; the
+squat stage uses build_pose targets with randomized ankles because bank equilibrium anchors
+made the path free-fall 39/40 times), speed-filtered (never >1.4 m/s, never >1.0 sustained
+past 0.1 s: the plop into the squat is a discrete event that ramp speed does not remove),
+then REVERSE TIME. Result: 8.8 s supine (0.095) -> press-up -> tuck -> squat -> stand
+(0.879), visually human (frame strip shown to the user), every frame a state this body
+actually occupied, rise speeds inherited under the launch fine's free line. 2 clips for
+now; yield improvement deferred.
+
+**The integration**: `track_reset_frac` 0.30 of episodes spawn ON the reference at a random
+phase (early-weighted, phase^1.5) and an eighth reward term `track` = w_track *
+exp(-joint_err^2/2) * exp(-dz^2/0.02) pays for staying near the film as its playhead
+advances. Finite and monotone: it ends at the stand and hands off to the salary, so it
+cannot be farmed by cycling. Verified before launch: 29.5% of resets on-film; track = 2.00
+exactly at spawn and 0.0000 for every other env; a mannequin diverges to 0.25 within 120
+steps, so the follow-the-film gradient is real and measured. Pools now: floor 0.30, track
+0.30, standing 0.20, midrise 0.10, rising 0.10. Exam ladder + EMA promoter stay from E41.
+
+**Run**: `runs/getup-20260816-120145`, warm start from E41 iter_00002331, budget 900M.
+Predictions: (1) reward/track climbs from its 0.02 start as the policy learns to ride the
+film (it starts at 2.0 and the film runs away; recovery of tracking = learning); (2) the
+ladder FINALLY promotes: film-riders complete level-0 holds en masse at the film's end; (3)
+PRIMARY: standing_frac_strict > 0 and the first FULL floor-to-stand-to-hold under the film's
+guidance; (4) failure mode: the policy tracks the film loosely for the pay but bails before
+the top; visible as track plateauing near ~1.0 with the ladder stuck, response: raise
+w_track or slow-phase RSI, decided at the verdict.
+
+### E41  2026-08-16  PRE-REGISTERED: the churn measured, the promoter smoothed
+
+**The measurement the E40 verdict asked for, done first.** Across the last five checkpoints
+(100 iterations apart): catch rate 72/80-80/80, STABLE; hold completions 0-21/80, churning.
+Latch-rate over the whole run: waves 2-86% with 17 threshold crossings, median consecutive
+latch streak 2 iterations, run-average 39%. KL correlates only weakly (-0.27). Verdict on
+the two candidate reads: **the catch skill accumulates and does not decay (worst version of
+(b) refuted); the hold-under-shove outcome is intrinsically noisy (stochastic shove timing
+and direction), and the promotion criterion sat on top of that noise demanding 1200
+CONSECUTIVE steps: a gauntlet the measured signal passes never, while its average clears
+the bar by 39x.** The brittle promoter (a) is the disease; entropy/LR (b) stays untouched.
+
+**E41 change, single**: promotion by EMA (timescale exam_promote_steps = 1200 env steps)
+instead of a consecutive-step streak. Tested on the measured churn shape (alternating
+3%/0%, 200-step windows): promotes in ~1000 steps where the old criterion promotes never;
+a steady 0.5% (below bar) and placed stands still never promote. Warm start from E40 final
+(`iter_00009155`), budget 900M. Also `keep_last_checkpoints` 5 -> 24, because E40's probe
+history was destroyed by the 5-checkpoint window and the churn analysis had to be
+reconstructed from metrics alone.
+
+**Predictions**: (1) promotion 0 -> 1 within ~1000 iterations (the earned frac is already
+oscillating around the bar); (2) each new level initially drops the latch rate, then
+recovers: that is the curriculum working, not regression; (3) PRIMARY: level 2+ by run end
+and the first nonzero standing_frac_strict; (4) risk: promotion into oscillation stalls at
+some level with EMA hovering just under the bar; if the ladder sticks mid-level for 3000+
+iterations, the next lever is per-level exam_promote_frac or hold-outcome variance reduction
+(narrow the shove window), decided then.
+
+### E40 FINAL, iteration 9155: verdict MIXED, and the most progress of any run
+
+**Run** `runs/getup-20260816-020136` (rising bridge + exam ladder, warm start from E39,
+900M steps). Against the four predictions:
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | rising starts caught within ~500 iterations | **YES**: the latch (level-hold completion) fired from iteration ~460 onward, and in total in **3580 of 9155 iterations**, the first hold completions in project history |
+| 2 | earned promotion 0 -> 1 | **NO**: the earned frac (>1% for 1200 consecutive steps) never sustained; level 0 the whole run |
+| 3 | skills flow down the ladder | PARTIAL: floor probe went 0.00% -> 0.07% -> 0.50% -> 0.82% U-frac with max hold 131 (nonzero floor standing for the FIRST TIME in any probe, growing monotonically); midrise 0 -> 0.17%/32 |
+| 4 | spoiling (catch rate collapses) | NO: catch rate oscillated 55 -> 92.5 -> 60 -> **97.5%** (78/80 at the final checkpoint), ending near-perfect |
+
+**What the bridge bought, measured across the night's probes:**
+
+| checkpoint | floor U / hold | standing U / hold | catch rate | det. hold completions |
+|---|---|---|---|---|
+| 2000 | 0.07% / 11 | 0.81% / 12 | 55% | 0/80 |
+| 4000 | 0.50% / 85 | 9.82% / **238 of 250** | 92.5% | 11/80 |
+| 6100 | 0.26% / 93 | 7.80% / 188 | 60% | 4/80 |
+| 9155 | **0.82% / 131** | 1.42% / 19 | **97.5%** | 6/80 |
+
+The catch skill is real and by the end near-perfect. Floor standing exists and grows. The
+standing-pool numbers OSCILLATE wildly between checkpoints (238 -> 19), which is the
+remaining story: the policy cycles through skill configurations instead of accumulating
+them, and the promotion criterion (1% earned for 1200 CONSECUTIVE steps) never survives the
+churn even though the average is near the bar. Level-0 holds completed in 39% of all
+training iterations, yet never steadily enough.
+
+**For the next session, two candidate reads, both recorded rather than decided at 6 a.m.:**
+(a) the promotion criterion is too brittle for an oscillating learner (1200 consecutive
+steps of a noisy 1% signal is a coin-flip gauntlet; an EMA-based criterion would promote on
+sustained average instead); (b) the oscillation itself is the disease (KL-driven LR +
+entropy churn destroys skills as fast as they form; candidate levers: lower entropy_coef,
+LR schedule, or freezing exploration once latch frequency is high). Measure (b) before
+touching (a): if skills genuinely decay between checkpoints, a smoother promoter would just
+promote into a regressing policy.
+
+### E40 PREPARED while E39 finishes: rising starts, the discovery bridge
+
+`scripts/generate_rising_states.py` -> `data/fallen/bank_v3.npz` = bank_v2 + 160 mid-rise
+states WITH upward momentum, built by time-reversing the generator's physically honest
+descents (stand -> squat/crouch) and sampling phases 35-90% of the way up. EVERY kept state
+proves itself by completing: plain servos holding the standing target must finish the rise
+from it (pelvis >= 0.70 within 1.2 s). Pelvis span 0.22-0.88, upward velocities +0.05 to
++2.09 m/s (tails above 1 m/s briefly meet the launch fine, which teaches exactly the
+deceleration a catch is made of).
+
+Task support: `rising_reset_frac` (default 0.0), fourth reset pool. Rising starts share the
+midrise flag, so they are EXCLUDED from the success denominator (the start was given) but
+COUNT toward ladder promotion (catching a given rise into a stand is precisely the skill;
+persisting in a given stand is not, and stays masked). Verified: pools draw at configured
+fractions, momentum arrives through the reset path, success at level 0 stays zero, default
+config byte-path unchanged.
+
+**E40 REVIEW FOUND TWO BLOCKERS; both fixed and re-verified before deploy.**
+
+1. **The "phase" was a TIME index into descents that were not quasi-static.** Most recorded
+   descents collapsed (root speed to 3 m/s, pelvis to 0.04), and a servo ramp loses almost
+   no height early, so time-phase 0.8-0.9 sat at 98.5% of standing height: 73 of 160
+   "rising" states passed the FULL standing predicate AT RESET (placed stands, the exact
+   promotion-gaming exploit fixed once already), and the collapse tail time-reversed into
+   ballistic launches that the completes() gate cannot reject (momentum alone completes).
+   Fixed: descents rejected unless root speed stays under 0.6 m/s at every step (quasi-static
+   or nothing), phase parameterized by HEIGHT, kept states capped at pelvis 0.73, BELOW the
+   predicate's 0.745 height threshold. Re-verified: 0 of 64 rising starts pass the predicate
+   at reset; 64 of 64 still get caught by zero action within 300 steps. The pool is now 80
+   states, 0.61-0.72, squat family (crouch descents never pass the quasi-static filter).
+2. **`on_batch_end` ticks once per ENV STEP, not per PPO iteration** (vec_env calls it
+   inside step()), so the promotion streak "50 iterations" was really 50 steps = 0.4 s, 24x
+   faster than documented. It never bit E39 only because earned stands were zero. Fixed:
+   `exam_promote_steps` = 1200 (50 iterations x horizon 24), field renamed so the unit is in
+   the name, comment states the call-site fact. Additionally `was_down` bookkeeping: a stand
+   counts toward promotion only if the env was NOT-standing earlier in the same episode, so
+   any near-stand spawn must lose the predicate before its standing can count (belt to
+   from_standing's suspenders; an adversarial flag-stripped test showed was_down alone is
+   insufficient, both stay).
+
+**E40 pre-registration** (deploys when E39 completes, warm start from its final policy):
+`bank_path: bank_v3.npz`, `rising_reset_frac: 0.15`, `midrise_reset_frac: 0.25`, all else
+E39. Predictions: (1) rising starts get caught into level-0 stands within ~500 iterations
+(the completes() test proves a trivial controller can; the policy has 98 obs of context the
+servos lack); (2) the earned-stand promotion fires, level 0 -> 1, FIRST LADDER PASS in
+project history; (3) skills flow backwards down the phase ladder: catches at phase 0.9
+teach catches at 0.65, then rung starts start converting; (4) failure mode: the policy
+LEARNS to spoil given rises (dropping is locally cheaper than catching under the effort
+fine); watch reward/latch and the rising-start standing frac in probes; if spoiling is
+systematic, the effort penalty during the catch window is the suspect, not the bridge.
+
+### E39 checkpoint, iteration 3000: prediction 4 TRIGGERED, recorded on schedule
+
+Level 0 at iteration 3008, zero promotions under the earned-stand criterion. The 2000 probe
+says it precisely: even at the EASIEST exam (knee 1.30, hold 0.5 s), rung starts stand 0.01%
+of steps with a best streak of 3, and floor starts 0%. The gap is not the exam's strictness;
+it is the rise-and-catch transition itself, which random per-step exploration does not find
+(and cannot: iid Gaussian noise at 125 Hz through an 8 Hz action filter is dither, not a
+strategy; the coordinated 2 s, 28-joint push it would need to stumble on has effectively
+zero probability). The run continues to completion per the pre-commitment.
+
+**Next lever, as pre-registered: reversed-descent imitation.** The midrise generator already
+builds physically honest quasi-static DESCENT trajectories (stand -> squat, ramped servo
+targets, mass balanced the whole way). Played backwards they are reference RISE trajectories
+in this exact body, no mocap needed. Directed exploration instead of waiting for luck: the
+policy is paid for reproducing the reference from matching rung starts, which is what every
+published get-up system does. Build begins while E39 finishes overnight.
+
+### E38 ABANDONED at ~1600 of 9155; E39 PRE-REGISTERED: the exam ladder
+
+**E38** (warm start + 3x time): the 1600 probe showed standing max hold 31 of 250 against
+E37's 195: the warm start did NOT carry the streak skill (prediction 2 failed; the KL-11.65
+unfreeze spike at iteration 31 is the suspect). The user called the wider verdict, and they
+are right: sixteen runs, and he has never once stood up from the floor. Stopped.
+
+**E39, the pre-registered u_knee lever, widened into what the published record actually does.**
+HumanUP (RSS 2025), the only real-robot get-up, does not demand a strict exam on day one; it
+lets the robot stand ANY way, then tightens. Ours demanded mastery from the first minute of
+run one. The exam ladder: levels (knee 1.30, hold 0.5 s) -> (1.00, 1.0) -> (0.80, 1.5) ->
+(0.60, 2.0 = the real exam, constructor-enforced). ONLY knee and hold relax; all other 11
+conjuncts stay strict at every level. Promotion is achievement-gated (train-batch standing
+frac > 1% for 50 consecutive iterations), training env only (width-gated: the shared task
+instance must not be advanced by evaluations). **Reporting never relaxes**: eval carries
+`standing_frac_strict` beside the level predicate, and success counts only full-exam
+completions at the final level. Verified before launch: floor mannequin passes nothing and
+success stays 0 even where standing-start mannequins complete the level-0 hold; promotion
+fires after exactly 50 good wide batches; a narrow batch cannot advance the level; a ladder
+not ending at the real exam is rejected by the constructor. Preflight 17/17, Oracle 0.
+
+**AMENDMENT, 15 minutes in.** The first promotion criterion counted the WHOLE batch's
+standing fraction, and the 30% placed standing starts promoted the ladder 0 -> 2 within the
+opening hundred iterations while the latch sat at zero: promotions without a single earned
+stand. Caught by the "two PROMOTED lines but latch 0/384" contradiction in the first watch
+cycle. Fixed: promotion now counts only `standing & ~from_standing` (a stand reached from
+the floor or pushed up from a rung; a placed stand proves nothing by persisting). Verified:
+60 batches of placed-only stands promote nothing; 55 batches of earned stands promote to
+level 1. Relaunched as `runs/getup-20260815-233654`.
+
+**Run**: `runs/getup-20260815-233654`, warm start from E37 final, budget 900M (~9155
+iterations, overnight). Predictions: (1) level 0 is passed and promotion 0 -> 1 happens
+within ~1500 iterations (the current policy already flashes near-stands with bent knees);
+(2) the latch fires many times at level 0 (it now marks level-hold completions); (3)
+PRIMARY: the ladder reaches level 2 or higher by run end, with `standing_frac_strict` > 0
+appearing once level 2+ is active; (4) failure mode: parked forever at level 0 (never 1% for
+50 straight), which would say the gap is below even the easiest exam and the next lever is
+reversed-descent imitation (the physically-honest rise trajectories already exist in the
+midrise generator, played backwards).
+
+### E37 FINAL, iteration 3051: verdict MIXED. The tuck taught the posture, not yet the push.
+
+**Run** `runs/getup-20260815-202213` (tuck axis, height-masked). Against the pre-registration:
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | tucking within ~300 iterations | **YES**: knee 2.25 / feet 0.83 BW / gate 81% at eval 250, and the tuck recurs through the whole run (knee 1.8-2.45 in most late evals). The posture the user prescribed is now part of the behaviour. |
+| 2 | floor probe beats 0.417 by 1400 | NO: 0.358 at the 1200 probe |
+| 3 | standing_frac > 0 | **NO: 0.0% on all 61 evals** |
+| 4 | hook-lying corpse | No frozen tuck; the final policy rests lying with feet lightly pressed, cycling through tuck episodes |
+
+**Highlights**: standing-pool hold streak **195 of 250** at the 1200 probe, the project record
+(78% of the exam, 200 iterations earlier than either baseline). The latch never fired; hold
+averaged 0.00019 with peaks above the E35 plateau but no sustained break.
+
+**The honest mechanics, observed live**: holding a tuck costs drain until the rise completes,
+so tuck episodes pay only when followed through; the policy tucks, cannot yet push through,
+and relaxes back flat. The axis built the user's posture into the repertoire; the missing
+piece is now purely the push-to-stand and the last stretch of the hold. Four full runs on
+the E34 reward, ZERO exploits: the reward is holding. What has not been given is TIME: every
+run trains 1.7 h from scratch and the skill curves (hold streaks 127 -> 195) are still
+climbing when the budget ends.
+
+### E38  2026-08-15  PRE-REGISTERED: same objective, three times the time, no reset to zero
+
+**The lever is optimisation time, not another mechanism.** E38 warm-starts from E37's final
+policy (`--init-from .../iter_00003000.pt`) with `critic_warmup_updates: 30` (the recorded
+guard against the measured init_from KL blow-up: curriculum-20260814 hit approx_kl 24.45 at
+iteration 1 without it) and `total_env_steps` 900M (~9150 iterations, ~5 h, overnight).
+Config otherwise identical to E37.
+
+Predictions: (1) no KL blow-up in the first 50 iterations (warmup working); (2) hold streaks
+resume near 195 rather than restarting near 0 (the warm start carries the skill); (3)
+PRIMARY: the latch fires at least once (first completed 2 s hold in project history);
+(4) standing_frac > 0 on some eval. If after tripled time the latch still never fires, the
+next lever is the u_knee curriculum (0.6 -> 1.2 eased, annealed back), pre-registered as the
+last candidate before a design rethink.
+
+### E36 VERDICT at 1400 of 3051: NO EFFECT. Stopped; E37 deploys the user's sequencing axis.
+
+**Run** `runs/getup-20260815-191757`, midrise_reset_frac 0.40 (vs E35's 0.25), stopped at
+iteration ~1400 on its pre-registered criterion. All three signals negative:
+
+| Signal | Outcome |
+|---|---|
+| (a) reward/hold past E35's ~0.0003 plateau | NO: mean 0.0001 over iters 800-1400 (peak 0.00135, transient) |
+| (b) latch fires once | NO: never |
+| (c) standing_frac > 0 | NO: 0.0% on all 28 evals |
+
+Pool probe, base-to-base at iteration 1400: floor 0%/0 (best pelvis 0.238 vs E35's 0.417),
+rungs 0.02%/7 (still sliding down), standing 2.35%/34 (vs 6.9%/127; both runs oscillate,
+but nothing about 0.40 is better and the pre-registered read is clean). More rung exposure
+did NOT build the rung-to-stand link. SETTLED: raising midrise_reset_frac beyond 0.25 buys
+nothing by itself; do not retry without a mechanism change.
+
+**E37, deployed immediately (the user's insight, watching the videos): a second potential
+axis, "feet tucked under the pelvis".** The user named what the metrics could not: "он не
+понимает, что он делает" lying down, and prescribed the sequence: raise the torso a little,
+TUCK THE FEET UNDER, then push up from that crouch, balancing. The mechanism: the height
+axis is nearly silent for a supine body (no small motion changes min(pelvis, head)), so the
+floor gradient pointed nowhere; the tuck axis (horizontal pelvis-to-feet distance mapped to
+[0,1]) is loud from the very first supine centimetre and its completion IS the squat the
+rest of the reward already pays. Implemented STRICTLY through the potential
+(phi = lift + 0.25*tuck, gammas matched), never as a term: the adversarially-reviewed
+staged-bonus design died to boundary farming, and the potential provably cannot be farmed.
+Verified before launch: Phi monotone along the user's sequence (supine 0.08, seated 0.10,
+all-fours 0.12, squat 0.70, crouch 0.77, standing 1.23); foot in-out cycling telescopes to
+zero; a curl collects its tuck value once on the way in and never again.
+
+**E37 AMENDMENT, 20 minutes in.** The first tuck implementation measured HORIZONTAL
+pelvis-to-feet distance unmasked, and the camera caught the consequence within 300
+iterations: a shoulder-stand ("candle", legs straight up) puts the feet at zero horizontal
+distance while touching nothing, so the axis paid a pose with the feet in the air. The E34
+rule (every foot quantity is height-masked) had been skipped on the new axis. Fixed
+per-foot: a foot above u_foot_height contributes zero tuck. Re-verified: the candle now
+reads tuck 0.00 (was ~0.9), the ladder stays monotone (supine 0.08, squat 0.70, crouch
+0.76, standing 1.21). Old run killed at ~300 iterations; relaunched as
+`runs/getup-20260815-202213`. Cost of the miss: 10 minutes. Also noted: all-fours reads
+tuck 0 under the mask (feet planted far behind), which is correct: hands-and-knees is not
+"feet under you", and the height axis prices that path instead.
+
+**E37 pre-registration**: single change vs E36 = `shaping_tuck_gain` 0.0 -> 0.25.
+Predictions: (1) supine floor envs start tucking within 300 iterations, visible as
+`eval/knee_max` rising with pelvis LOW (hook-lying has bent knees) and in frames as
+knees-up-feet-planted; (2) the floor pool probe's best pelvis exceeds E35's 0.417 by 1400;
+(3) PRIMARY, same as ever: standing_frac > 0, now expected via floor-to-squat-to-stand;
+(4) failure mode to watch: tucked-and-frozen (a hook-lying corpse); the tuck potential pays
+it once only, so it should not stick, but if it does the response is NOT a new term, it is
+episode-mix rebalancing. Next candidates if E37 fails: warm start from the best policy with
+critic warmup, then a measured u_knee curriculum.
+
+### E35 FINAL, iteration 3051: verdict MIXED. The first clean run in project history.
+
+**Against the pre-registration:**
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | reward/lift elevated 10-100x | YES: ~7-9x sustained (0.0033-0.0045 vs 0.0005), rungs paid all run |
+| 2 | standing_frac > 0 by 1500 | **NO: 0.0% on all 61 evaluations, to the very end** |
+| 3 | chain runs downhill | PARTIAL, see the probe: top cemented, bottom learned to sit, the middle link never formed |
+| 4 | rungs collapse before paying | did not happen (they pay, then slide) |
+| 5 | ovspd stays near zero | YES except honest push-up bursts at 1950-2050 (9-15%), which the launch fine priced back to 0.1-0.4% |
+
+**What this run is, despite the failed primary**: the first full run with ZERO exploits end
+to end. No jumping, no curl, no press, no headstand, no freeze-for-profit: the reward held
+under 300M steps of optimisation pressure. Everything the policy did was honest: it sat up
+(pelvis 0.42 from the floor, vs 0.16 flat in E34), it held placed stands to 127 of 250 steps
+(vs instant destruction), it found the side-plank arm-prop transition on camera, and its
+late-run push-up bursts were exactly the right idea at exactly the wrong speed.
+
+**The wall, precisely**: the rung-to-stand link. From crouch and squat starts the policy
+slides DOWN to sitting within 2 s instead of pushing up the last two rungs. All three pools
+measured separately at 1400 (see the checkpoint entry): floor 0/96 stands, rungs 0.01%
+U-frac, standing 6.9% U-frac with max hold 127.
+
+**Honesty notes**: action_std drifted 0.38 -> 0.79 in the last thousand iterations (entropy
+bonus pushing against a plateaued return); the cap held it. The mid-run sit-up and
+side-plank behaviours did not survive into the final policy, which quieted back toward
+low-lying activity. Held_ever never fired once, so the latch never paid, and the hold
+seniority topped out around half.
+
+**E36, deployed on completion**: `midrise_reset_frac` 0.25 -> 0.40 (the lever chosen at the
+1500 checkpoint from the pool probe), everything else identical. Floor share drops to 30%.
+The bet: the rung-to-stand link needs more attempts and a critic that tastes rung states
+more often; if E36's probe still shows rungs sliding down at its checkpoint, the next
+candidate is a warm start from this run's final policy with critic warmup, and after that,
+easing u_knee (the strictest conjunct) as a measured curriculum, not a permanent softening.
+
+### E35 checkpoint, iteration 1500: prediction 2 FAILED, recorded on schedule
+
+`standing_frac` 0.0% at 1500, as the pre-committed rule anticipated it might be. The run
+continues to completion (it costs nothing and its trends are the best in project history).
+
+**The per-pool probe that decides the lever** (iter_00001400, 96 envs x 8 s per pool,
+deterministic):
+
+| start pool | U-frac | max hold | pelvis@2s | best pelvis |
+|---|---|---|---|---|
+| floor | 0.00% | 0 | 0.333 | 0.417 |
+| midrise rungs | 0.01% | 7 | 0.327 | 0.685 |
+| standing | **6.87%** | **127 of 250** | 0.238 | 0.907 |
+
+Three facts fall out. (1) The standing pool is HALF-WAY to a completed hold: max streak 127
+of 250, against "destroyed within one iteration" at E34's start. The top of the ladder is
+being cemented. (2) The floor policy now genuinely sits up on its own: best pelvis 0.417,
+holding ~0.37 at episode end, against 0.16 flat in E34. (3) **The missing link is
+rung-to-stand: crouch and squat starts slide DOWN to sitting within 2 s** (pelvis 0.68 ->
+0.33) instead of pushing the last two rungs up. The rungs pay (lift is collected, prediction
+1 holds), the policy just does not yet know that pushing UP from a rung is worth more than
+sliding down.
+
+**Lever decision, per the pre-registration**: HIGHER midrise fraction (0.25 -> 0.40), not
+the shorter-settle variant. The shorter-settle lever targets "rungs collapse before paying",
+which the probe rules out (they pay; they collapse under the POLICY's own actions seconds
+later). More rung exposure attacks the actual gap: more attempts at the rung-to-stand push,
+and a critic that tastes rung states 60% more often. Deploys as E36 when E35 finishes.
+
+### E34b  2026-08-15  The response lever, built BEFORE its trigger: bank_v2 mid-rise rungs
+
+Prepared while E34 runs, so that if the pre-registered trigger fires (floor-parking stable
+500+ iterations, or standing_frac 0.0% at 2000) the response deploys as two yaml lines plus
+a restart, instead of an hour of tooling under time pressure.
+
+`scripts/generate_midrise_poses.py` -> `data/fallen/bank_v2.npz` = bank_v1 (byte-identical,
+all fields carried) + 300 ladder rungs: 60 each of all-fours, kneel, half-kneel, squat,
+crouch, spanning pelvis 0.27-0.70 against a 0.877 stand.
+
+**What building it taught, the hard way:**
+- **Authored poses are mid-topple, not at rest.** Hand-guessed joint angles failed the bank's
+  fixed-point validation 22-24 times of 24 at every settle length (the body is slowly
+  falling the whole time). Squat and crouch are now REACHED by ramping servo targets down
+  from a stand, and every kind is MINED: sample states along physical trajectories, keep the
+  ones that pass validation. Physics picks the equilibria; the authored targets only steer.
+- **The ankle was the load-bearing unknown.** With default (vertical-shin) ankles, zero
+  squat/crouch equilibria exist in 801 mined descents: the mass stays behind the feet at
+  every depth. The ankle target is drawn from its whole range and mining keeps what works
+  (E25's lesson: never guess a sign convention).
+- **A crouch has NO passive equilibrium on this model, and that is physics, not a bug.**
+  801 descents, zero fixed points under the strict lying-pose contract. Humans stabilise a
+  crouch actively too. Active-balance rungs (squat, crouch, half-kneel) therefore carry
+  their own documented contract, `is_valid_active`: finite, penetration-free, and holding
+  85% of pelvis height through the first quarter second. "Catch yourself mid-crouch" is a
+  state the curriculum wants; "already fallen by the time the policy acts" is not.
+
+**Task support**: `midrise_reset_frac` (default 0.0, so nothing changes until deployed),
+three-pool draw in `reset_pose`, and midrise starts excluded from the success denominator
+exactly like standing starts. Verified end-to-end: pools draw at configured fractions
+(28.9% / 24.6% / 46.5% at 0.30/0.25), success counts 0 standing rows, 0 midrise rows, and
+with bank_v1 at frac 0.0 the draw path is unchanged (0 midrise rows).
+
+**Deployment, when and only when the trigger fires**: in `configs/getup.yaml` set
+`bank_path: data/fallen/bank_v2.npz` and `midrise_reset_frac: 0.25`, restart, new entry.
+
+### E33  2026-08-15  THE HOLD WAS UNSATISFIABLE BY CONSTRUCTION. For twelve runs.
+
+**The defect.** The task's own anti-cheat shove made the success predicate impossible to
+satisfy, for any policy, ever:
+
+1. `hold_push_vel = 0.6` m/s is written by the engine STRAIGHT INTO qvel. Not through the
+   actuators. No policy action can prevent or resist it.
+2. Conjunct 13 of `U` requires `|v| <= 0.4` m/s. Measured over 69-72 shove events: |v| on the
+   step after a shove is **0.62**. So the shove violates `U` by arithmetic.
+3. The shove fires at `hold_steps` in [40, 140), always before the 250 needed.
+4. The miss resets `hold_steps` to 0, re-arms `pushed`, redraws `push_at` from the same
+   window. The next attempt is shoved identically. The cycle has no exit.
+
+Plus the second arm: `domain_rand.push_vel_xy = 0.7`, same mechanism, invisible to the task,
+~3.2 times per 20 s episode.
+
+**Proof, both directions.** The model's own nominal stand, held by a fixed-target servo (a
+controller that cannot balance at all), 64 envs:
+
+| | best hold reached | completions |
+|---|---|---|
+| shove 0.6 as shipped | 137 / 250 | 0 of 64 |
+| shove 0.6, DR off | 186 / 250 | 0 of 64 |
+| **shove OFF** | **330 / 250** | completes |
+
+The hold was reachable the whole time. The mechanism built to TEST it was TERMINATING it.
+
+**What this invalidates.** `standing_frac = 0.0%` and `held_ever = 0` across twelve runs were
+read, every time, as evidence about the reward, the exploration, or the discount horizon
+(E29-E32 all did this, including yesterday's E32 verdict). They were evidence of nothing
+except this defect. `w_stand` (2.0), `w_quiet` (0.5) and `w_posture` (0.5), i.e. 3.0 of the
+4.5 positive budget, were unreachable by construction, so every policy ever trained here was
+optimising the remaining 1.5, which is exactly the ungated `upright` + `rise` world the E32
+curl exploited. The E30/E31/E32 findings about the PUMP and the CAP remain valid (they were
+measured on their own terms), but every claim of the form "he cannot hold" is void.
+
+**How it survived twelve runs of scrutiny.** Every earlier check verified reachability of the
+POSE (Oracle `getup_hold_and_thresholds_are_reachable` checks thresholds against a settled
+stand; the preflight checks the hold fits the episode). Nothing ever simulated the hold
+BOOKKEEPING end to end under the shove. The one test that would have caught it, "can a
+perfect stand complete the hold at all", did not exist until today.
+
+**The fix**, two arms of one principle (no impulse the setup itself injects may void the
+predicate by arithmetic):
+
+- `U` split into `U_geom` (conjuncts 1-12, pose) and `U_vel` (13, motion). After a shove THIS
+  TASK fired, `hold_push_grace = 50` steps (0.40 s) forgive `U_vel` ONLY. Pose conjuncts are
+  never forgiven for a single step: a body that topples still fails instantly. The shove now
+  tests what it was built to test, staying ARRANGED like a stand while being pushed.
+- `domain_rand.push_vel_xy` 0.7 -> 0.3, below the 0.4 cap, because the engine push is
+  invisible to the task and no grace can cover it.
+
+**Verified after the fix**: servo max hold 137 -> **643**, completions 0/64 -> 3/64 (the
+three whose geometry survived the shove; the servo cannot balance, so 3 is the honest
+number). Zero-action mannequin on the real task: `held_ever` **0 of 128** over 1000 steps,
+the anti-cheat is not resurrected. Preflight 17/17. New Oracle check
+`external_impulses_cannot_void_the_hold` fires on the old config and passes the new one.
+
+**Pre-registered predictions for the next run (single change: this fix; gamma 0.9985 and the
+E32 reward stay exactly as they are, pump and all):**
+
+1. **`standing_frac` > 0 for the first time in project history**, by iteration 2000. This is
+   the primary prediction. The E32 curl attractor still exists and still pays 0.50/step, so
+   the bet is specifically that 2.0 of newly-reachable `stand` (+ up to 1.0 of quiet/posture)
+   against the curl's 0.50 changes which basin wins.
+2. `held_ever_frac` > 0 by iteration 2500 on at least one evaluation.
+3. If `standing_frac` is still exactly 0.0% at iteration 2000, THE REWARD is the remaining
+   suspect (the curl basin), and the response is the deferred redesign (gate `upright`,
+   shaping_gamma match), NOT another bookkeeping hunt.
+4. `action_std` stays at or below 1.00 (E30 cap).
+5. Honesty note: prediction 1 can fail simply because PPO never explores into the far basin
+   in 3000 iterations. That outcome does not falsify the fix (the servo proof stands); it
+   says the slope to the basin is the problem, which is what the deferred redesign is for.
+
+**Deep review before launch** (5 adversarial angles, all measured against the live code): 0
+blockers. The bookkeeping hand-trace matched a numerical drive of the real class; the grace
+opens the step before the impulse lands and forgives exactly 49 steps; observations carry
+none of push_at/push_grace/hold_steps (`task_obs_dim` 0), so nothing can be pre-braced. An
+independent re-implementation reproduced 3/64 completions exactly, and the grace-0 control
+reproduced the defect (158/250, 0/64), proving the grace is the load-bearing change. One
+real hardening found and applied: residual grace survived a mid-attempt reset, letting a
+deliberate one-step geometry break stack two graces into one counted hold (99 of 250 steps
+above the cap); `push_grace[reset_now] = 0` closes it, re-verified. Also confirmed: the DR
+push at 0.3 cannot void conjunct 13 even at the boundary (quiet-stand sway 0.04-0.10 + 0.30
+<= 0.40), task and DR impulses never stack (task overwrites), and eval envs run DR-off while
+the task shove still fires there, so evaluation tests the shove.
+
+**Known dead config, logged not fixed**: `configs/getup.yaml`'s `task:` section is stale
+locomotion keys GetUpTask never reads, and `no_config_section_is_silently_ignored` does not
+cover the getup task (returns [] silently). Harmless for this run, but an ablation that
+patches `task:` on a getup run would silently no-op, the exact six-identical-arms failure
+that check was written for. Extend the check's mapping before any getup ablation.
+
+**Run**: `runs/getup-20260815-150447`, launched 2026-08-15 15:04, ~1.5 h.
+
+---
+
+#### VERDICT: **MIXED**. The fix is proven; the reward then funded a jumping machine.
+
+Stopped at iteration 1820 of 3051 by the user, whose words are the verdict: "он будет просто
+прыгать. Ему выгодно просто прыгать и получать награду. Он все награды получает, но не даёт
+нам то, что нужно."
+
+**Scored against the pre-registered predictions:**
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | standing_frac > 0 by iteration 2000 | **NO.** 0.0% on all 35 evaluations, to 1750. |
+| 2 | held_ever_frac > 0 by 2500 | NO (run stopped at 1820, was 0.0% throughout). |
+| 3 | if 0.0% at 2000: the reward's basin is the suspect, go to the redesign | **TRIGGERED** (called at 1800 by the user; the trend was flat). |
+| 4 | action_std at or below 1.00 | Held: 0.583-0.995, never above. |
+| 5 | fix not falsified by a floor-stuck policy | Held, and more: the policy DID leave the floor. |
+
+**What changed behaviourally, and it is real progress in the wrong currency.** At iteration
+~1050 the policy abandoned the curl (pelvis eval 0.20 -> 0.65 sustained for 700 iterations,
+knees unfolding, feet loaded ~0.5 BW). At 1300 the frames showed a genuine transient
+standing pose, the second ever seen in this project. It then converged not to standing but to
+**ballistic cycling**: jump, flash an upright instant, crash, repeat.
+
+**Jump forensics, measured on iter_00001700** (32 envs, 14 s, no DR):
+
+| | his policy | human getting up |
+|---|---|---|
+| airborne share of all steps | **63.8%** | ~0 |
+| apex pelvis height | median 1.48 m, max 1.65 | 0.877 (standing) |
+| take-off velocity | up to **5.0 m/s** | 0.5-1.0 m/s |
+| foot force at take-off | median 1.5 BW, max **6.2 BW** | 1.1-1.3 BW |
+
+A 5 cm hop is 0.99 m/s of take-off velocity, so "human-fast" and "a 5 cm hop" are the same
+1.0 m/s line, and his 4.65-5.0 m/s sits five times above it. Clean separation on both axes.
+
+**Why he jumps: it is PAID, twice.** The shaping pump (shaping_gamma 1.0 vs ppo.gamma 0.9985)
+still nets a profit per up-down cycle, and ungated `upright` pays in mid-air. E31 measured
+both; E33 kept them deliberately unchanged to isolate the hold fix. The hold fix is proven by
+construction (servo completes) and now the reward is the last suspect standing, exactly as
+prediction 3 pre-registered.
+
+**Next: E34, the full reward redesign as one verified package** (adversarially designed
+2026-08-15, four designs x two attackers x critic, plus the user's force mechanism):
+delete `upright` and `rise`; one dense `lift` term (min(pelvis, head) height) behind a
+force-CORRIDOR gate (opens 0.35-0.75 BW, closes again 1.6-2.4 BW: human rise forces pay,
+jump take-offs do not), evenness and stance-width factors; `stand` + seniority `hold` +
+once-per-episode `latch` behind U; penalties damped 10x on the floor; a one-sided quadratic
+`launch` penalty above 1.0 m/s upward root velocity (free at a 5 cm hop, ruinous at 5 m/s);
+shaping on phi = lift at shaping_gamma = ppo.gamma, weight re-derived 150 -> 60; foot force
+height-masked (sensor reads 13 BW in mid-air self-contact); foot force and root height added
+to the OBSERVATION (the reward depended on quantities the policy could not see);
+standing_reset_frac 0.15 -> 0.30 so the big salary is experienced from iteration 1.
+
+### E31  2026-08-15  Exploration cap WORKED. He now jumps, and two measurements say why.
+
+- **Run**: `runs/getup-20260815-104811`. `log_std_max` 5.0 -> 0.0 (the E30 fix), everything else as E30.
+- **Stopped at iteration 1200 by the pre-committed rule** ("torso not inverted" below 40%). It was **16.8%** at iteration 1195, **21.8%** re-measured at 1200. The rule fired and I did not soften it, but the reason it recorded ("the `2*min` both-feet gate is too harsh") is **WRONG**, and two measurements below say what is actually happening. The rule was aimed at the previous failure and kept pointing there after the failure changed.
+
+**What the fix bought.** VERDICT: **WORKED**, cleanly.
+
+| | E30 (log_std_max 5.0) | E31 (capped at 0.0) |
+|---|---|---|
+| action_std, iter 300 -> end | 0.79 -> **3.43** | 1.000 -> **1.000**, every single check |
+| return, iter 300 -> end | 833 -> **19** | 833 -> **886 peak** |
+| torso not inverted | **0.1%** | **21.8%** |
+| pelvis high | 0.8% | **42.1%** |
+| head high | 0.1% | **33.4%** |
+
+`torch.clamp` behaved exactly as predicted in E30: the parameter sat ON the ceiling for 900 iterations and was still pulled back, never once above 1.001.
+
+**Determinism, and E22b is wrong.** The two runs were **byte-identical through iteration 300** (returns 81.3314, 163.7646, 323.6682, 585.0565, 556.8055, 833.2446 in both; std 0.740/0.728/0.785 in both), diverging only near 450 when the cap began to bind. Training IS deterministic under a fixed seed. E22b concluded from one identical-config pair (323 vs 2451) that "a seed does not pin a trajectory" and set a 7x noise floor that has been used to dismiss effects ever since. That conclusion is now **INVALID**; the 323/2451 pair differed by something other than the seed.
+
+**The new failure, seen before it was measured.** Frames at iteration 1200, from the newest checkpoint:
+
+| t | pelvis | head | feet BW | what |
+|---|---|---|---|---|
+| 0.0 s | 0.120 | 0.16 | 0.31 | on his back |
+| 1.2 s | **1.164** | 1.10 | **0.00** | airborne, hands at 1.47 m |
+| 2.4 s | 1.046 | 1.09 | **0.00** | still airborne |
+| 4.0 s | **1.276** | 0.99 | 0.43 | second launch |
+| 8.0 s | 0.371 | 0.18 | 0.00 | crashed |
+
+Standing pelvis is 0.877 and the standing threshold 0.745. He reaches **1.28 m with zero ground contact**. "not ballistic" ran 0.3-12.1% all run and was the worst conjunct in 3 of 4 measurements. He is not failing to get up. He is getting up **by jumping**, and landing on his head.
+
+**Cause 1, measured: `shaping_gamma = 1.0` is a reward pump in the sum PPO actually maximises.** The comment at `getup.py:159` claims "oscillating the pelvis up and down pays exactly zero". Measured over 9.6 s of the final policy, 64 envs:
+
+| | undiscounted | discounted at ppo.gamma |
+|---|---|---|
+| shaping alone | **22.3** | **44.7** |
+| everything else | 297.8 | 31.8 |
+| TOTAL | 320.0 | 76.5 |
+
+The shaping paid out **613.8** and clawed back **-591.5**. Undiscounted it does telescope, net 22.3 of 613.8 gross, so the comment is true about the sum I checked. It is false about the sum that is optimised: **discounted, the shaping is 44.7, larger than its own undiscounted value and larger than every other reward term combined (58% of the whole signal)**. Ng-Harada-Russell requires the shaping gamma to EQUAL the RL gamma; then `sum_t g^t (g*Phi_{t+1} - Phi_t)` telescopes to `-Phi(s_0)` and depends on nothing else. With `shaping_gamma = 1.0` against `ppo.gamma = 0.99` the sum is `sum_t g^t (Phi_{t+1} - Phi_t)`, which does not telescope: the rise is discounted less than the matching fall, so **every up-and-down cycle nets a profit**. Cycling beats standing, and standing still earns the shaping exactly zero. The policy is optimising correctly; the reward is wrong.
+
+**Cause 2, measured: `upright` is the largest term in the task and is paid in mid-air.** 306.0 of the 297.8 non-shaping total. It is `clip(-gravity_body_z)`, pelvis orientation alone, with no ground-contact gate, unlike `rise`, `quiet` and `posture` which are all gated. A level pelvis in free flight collects it in full.
+
+**The gate the rule blamed is not the problem.** `rise` is gated on foot load and therefore pays **zero** during flight, and it contributed 16.6 undiscounted against `upright`'s 306.0. It is not what is buying the jump. The `2*min` gate remains untested for a third run.
+
+**Cause 3, structural, found while checking cause 1: `gamma = 0.99` at 125 Hz is a 0.8 second horizon.**
+
+```
+gamma 0.99, dt 8 ms  ->  1/(1-gamma) = 100 steps = 0.80 s
+hold_seconds 2.0     =   250 steps, discounted to 0.081  (12.3x smaller than immediate)
+a 4 s get-up + 2 s hold  ->  0.00053
+```
+
+legged_gym runs 0.99 at 50 Hz, which is a 2.0 s horizon. **We copied the constant, not the horizon.** This is the same mistake as E19 (`max_episode_steps = 1000` copied from 50 Hz onto our 125 Hz loop) and has the same shape: a number lifted from a repo running at a different control rate. The task asks him to hold for 2 s. At this discount, succeeding at the hold is worth 8% of an immediate reward, and the whole get-up-and-hold is worth 0.05%. **The hold is outside the agent's horizon.** No reward shaping can fix a target the discount has erased. Every get-up run in this project has had this.
+
+- **Next**, in this order, and one at a time: (1) `gamma` 0.99 -> **0.998**, see E32; (2) `shaping_gamma` -> match `ppo.gamma` exactly, and re-derive `shaping_weight` with it; (3) gate `upright` on foot contact, or move its weight into `rise`.
+- **ARITHMETIC SLIP IN THIS ENTRY, corrected 2026-08-15.** It first read "the drain is 0.003/step at gamma 0.997, not 1.0/step". 0.003 is bare `(1-gamma)`, not the drain. The drain is `shaping_weight * (1-gamma) * Phi` = `150 * 0.003 * 0.7` = **0.315/step** at Phi 0.7, and 0.45/step at a settled stand. So step (2) does NOT come for free with a higher gamma: matching the gammas at weight 150 still costs a third of a point per step, against a standing reward near 4.3. Step (2) needs the weight re-derived, not just the gamma copied across. Caught by an adversarial audit of this entry, not by me.
+- **New Oracle checks, written and verified to bite**: `discount_horizon_covers_the_task` (the horizon must exceed the longest thing the task asks for) and `shaping_gamma_matches_rl_gamma`. Both fire CONTRADICTION on the config as it stood.
+
+### E31b  2026-08-15  The generator of the rate bugs, found and killed
+
+An audit of E31 went looking for the SOURCE of "constants copied from a 50 Hz repo" and found it. Two places asserted the wrong control rate, and one of them is a comment on the function that loads the model:
+
+- `humanoid_rl/envs/model_prep.py`: "MuJoCo then runs the PD at the full **200 Hz** physics rate while the policy sets targets at **50 Hz**". The scene's timestep is 0.002 (500 Hz) and decimation is 4 (125 Hz). Both numbers wrong, on the live code path.
+- `docs/research/conformance-audit.md`: OURS policy rate recorded as `50 Hz (200 Hz phys, decim 4)`, verdict **"ALIGNED (G1 exactly)"**. That audit is the document that signed off `gamma`, `gae_lambda`, `horizon`, `entropy_coef` and the reward weights as matching hardware-proven references. It was comparing a 125 Hz loop against 50 Hz repos and calling the numbers equal.
+
+Both corrected, and the audit now opens with a retraction listing every row it got wrong. **Rule recorded there: never compare a constant, compare the quantity it stands for.** A discount factor is a horizon in seconds, not a number. An episode limit is a duration, not a step count.
+
+- **Also found, logged not fixed**: `ppo.horizon` 24 is 0.19 s of experience here against 0.48-0.60 s at every reference. No provenance either way (`default.yaml` documents a batch-size rationale), so it is not a confirmed rate copy. Not bundled with E32.
+- **Also found, logged not fixed**: this repo does not multiply reward by `dt` while all three references do. Harmless on its own (advantages are normalised, and getup's weights are not sourced from the references), but it is why our value function is ~3x theirs.
+- **Stale Oracle remedy removed**: the shaping-drain check's remedy read "Use shaping_gamma = 1.0 so the sum telescopes", which is precisely the reward pump E31 measured. An Oracle recommending the bug it is supposed to catch.
+- **`fasttd3.gamma` is also 0.99** and carries the identical 0.80 s horizon, as does its value support `v_max: 800`. Not touched, because FastTD3 is not running and changing an idle config teaches nothing. Fix it before any FastTD3 rerun: E22's "ratio 2 and 16 both flat, 100% falls" was measured under the same erased horizon and may say less than it appears to.
+- **`getup_watch.sh` read the wrong log by luck**: `tail -1 /tmp/getup*.log | tail -1` picked the current run only because `_` sorts after `8` in ASCII across nine log files. Now selects by mtime.
+
+### E32  2026-08-15  PRE-REGISTERED BEFORE LAUNCH: gamma 0.99 -> 0.9985
+
+**Change**: `ppo.gamma` 0.99 -> 0.9985 in `configs/getup.yaml`. ONE change. Nothing else moved.
+0.998 was tried first and lands on exactly 4.00 s, failing `discount_horizon_covers_the_task`
+by 4e-15 s of floating point; the check was left alone and the number given margin instead.
+
+**Why this and nothing else.** The audit measured that raising gamma does two opposing things
+to the two behaviours in competition, and the arithmetic is the whole prediction:
+
+| | gamma 0.99 | gamma 0.9985 | change |
+|---|---|---|---|
+| a reward 2 s away (the hold) | 0.0811 | 0.6871 | **8.5x more valuable** |
+| a reward 4 s away (rise then hold) | 0.00655 | 0.4721 | **72x** |
+| pump profit per up-down cycle, `1 - g^k` at k=75 steps (0.6 s) | 0.529 | 0.1065 | **5.0x less profitable** |
+
+Holding gets 8.5x better and jumping gets 5x worse, so the ratio between them moves by about
+42x. If the jumping is a discount artefact, this is enough. If it is not, nothing about this
+change will help and the reward pump (`shaping_gamma`, step 2) is the remaining suspect.
+
+**Predictions, written before the run, falsifiable, in order of how much I believe them:**
+
+1. **"not ballistic" clears 40% by iteration 1200.** It has run 0.3-12.1% and was the worst of
+   the 13 conjuncts in 3 of 4 measurements. This is the primary prediction and the one I would
+   bet on. Below 20% at 1200 means gamma was not the mechanism.
+2. **`standing_frac` becomes non-zero for the first time in this project.** It has read exactly
+   0.0% on every evaluation of every get-up run ever. Predict above 1% by iteration 2000.
+3. `held_ever_frac` above 0 by iteration 2500. Weaker: it needs all 13 conjuncts at once for
+   250 consecutive steps, and stance width (4.4-12.1%) and per-foot load (8.7-15.5%) are also
+   low for reasons gamma does not touch.
+4. Pelvis height does NOT need to improve and probably will not. It is already 0.60-0.73 against
+   a 0.745 threshold. If the story is right, what changes is that he stops leaving.
+5. `value_loss` rises 3-5x in the first iterations and recalibrates within about 25. Measured on
+   this repo's own critic: 21 iterations to fit the wider target versus 14. **This is expected
+   and is not a failure signal.** Do not stop the run for it.
+6. `action_std` stays at 1.000. If it exceeds 1.01 the E30 cap is not binding and that is a bug.
+7. Eval return is undiscounted, so it stays comparable: predict 600-1200, no jump from the
+   gamma change itself.
+
+**What I expect to still be broken afterwards**, so a partial success is not read as a full one:
+the `upright` term is 306 of 306 non-shaping reward and is still collected in mid-air, and the
+shaping is still a pump, 5x smaller but not zero. Steps 2 and 3 remain.
+
+**KNOWN OPEN CONTRADICTION, shipped deliberately.** `scripts/oracle.py` still reports
+`shaping gamma: shaping_gamma 1.0 != ppo.gamma 0.9985`. That is step 2 and bundling it would
+make this run uninterpretable: two changes, one number. Recorded here rather than left for
+someone to find in a red Oracle they have learned to skip. `train.py` does not gate on the
+Oracle at all, which is its own finding: nothing in the pipeline forces anyone to read it.
+
+**Pre-committed stopping rule, not to be softened:** if "not ballistic" is below 20% at
+iteration 1200, stop and record that the discount horizon was not the mechanism.
+
+---
+
+#### VERDICT: **MIXED**. The change did exactly what it was designed to do, and the run got worse.
+
+Stopped at iteration 600 of 3051. The stopping rule did NOT fire ("not ballistic" was 62.1%,
+far above its 20% floor). Stopped for a different, measured reason, stated below.
+
+**The mechanism worked, and this is the part to keep.** Same measurement script as E31, same
+policy-rollout conditions, 9.6 s over 64 envs:
+
+| | E31 (gamma 0.99) | E32 (gamma 0.9985) |
+|---|---|---|
+| shaping, discounted | 44.7 | **6.0** |
+| shaping as a share of the whole signal | 58% | **3.5%** |
+| shaping gross flow, paid / clawed back | 613.8 / -591.5 | 275.9 / -276.9 |
+
+The pump fell **7.5x**. Prediction 3 in the table above said 5x. Raising the discount horizon
+does defuse a gamma-mismatched potential shaping, quantitatively and about as hard as predicted.
+
+**And it immediately exposed the next exploit, which was pre-registered on this very page as
+"what I expect to still be broken afterwards".** With the pump gone, the reward has almost
+nothing else in it:
+
+| term | undiscounted | discounted |
+|---|---|---|
+| **upright** | **393.6** | **169.3** |
+| effort | -12.4 | -6.7 |
+| rise | 3.4 | 2.6 |
+| stand, quiet, posture | 0.0 | 0.0 |
+
+`upright` is **169.3 of 171.2, i.e. 99% of the entire signal**. It is `clip(-gravity_body_z)`,
+pure pelvis ORIENTATION, with no height requirement and no ground-contact gate. Over the same
+9.6 s: mean pelvis 0.336, **0.0% of steps above the 0.745 standing line**, any foot contact on
+11.1% of steps. `stand`, `quiet` and `posture` are all gated on U and paid exactly zero, so the
+task's own definition of success contributed nothing to the return at any point.
+
+**The policy converged to lying still.** Final checkpoint, rendered:
+
+| t | pelvis | head | feet BW | knee | hands |
+|---|---|---|---|---|---|
+| 1.2 s | 0.952 | 0.60 | 0.00 | 2.62 | 0.63 |
+| 2.4 s | 0.209 | 0.12 | 0.00 | 2.78 | 0.04 |
+| 4.0 s | 0.193 | 0.20 | 0.00 | 2.80 | 0.04 |
+| 8.0 s | **0.193** | **0.19** | **0.00** | **2.80** | **0.04** |
+| 15.0 s | **0.193** | **0.19** | **0.00** | **2.80** | **0.04** |
+
+One launch, one crash, then a tight ball with the knees at their limit, motionless for eleven
+seconds, identical to three significant figures. Return climbed 563 -> 915 -> 1057 across three
+consecutive evaluations while pelvis height fell 0.482 -> 0.265 -> 0.253. **The best return in
+this task's history was earned by a humanoid that does not move.** That is why it was stopped:
+the gradient was actively deepening it and 2500 iterations remained.
+
+**Scored against the predictions, honestly:**
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | "not ballistic" clears 40% | **Met numerically (62.1%) and worthless.** See below. |
+| 2 | `standing_frac` above 1% | **NO.** 0.0% on all 12 evaluations, as on every get-up run ever. |
+| 3 | `held_ever_frac` above 0 | NO. |
+| 4 | pelvis stays 0.60-0.75, no improvement needed | **WRONG, and wrong in direction.** It collapsed to 0.235. |
+| 5 | value_loss recalibrates in ~25 iterations | Held. No instability. The audit's measurement was right. |
+| 6 | `action_std` stays at or below 1.000 | Held: 0.583-0.654 throughout, never near the cap. |
+| 7 | eval return 600-1200, comparable | Held: 563-1057. Comparable, and meaningless. |
+
+**THE LESSON, and it is the third time: I pre-registered an ABSENCE predicate as the success
+metric.** "not ballistic" is `speed < threshold`. A body lying motionless satisfies it
+perfectly. So does a corpse. It went 5.1% -> 43.8% -> 62.1% while everything requiring an
+actual stand went the other way (knees straight 2.6% -> 0.2% -> **0.0%**, feet on the floor
+4.5% -> 0.7%, each foot 20% 2.7% -> 1.2%). The primary metric improved 12x by the policy
+getting worse at the task.
+
+This repo has now shipped that exact class of bug three times: `gait_symmetry` reading 1.0 for
+standing still (E02), the stillness terms that `getup.py:447` warns "this repo has shipped that
+exact bug twice", and now the metric I chose to judge the fix by. **Rule: a success criterion
+must be a thing the humanoid DOES, never a thing it refrains from.** Absence predicates belong
+in conjunctions as guards, never alone as a headline.
+
+- **Next**: step 3, gate `upright` on ground contact. It must use the foot-force SUM, not
+  `rise`'s `2*min(left, right)`, or a half-kneel (one foot planted, one knee down), a
+  legitimate stage of a human get-up, scores zero.
+- **Carried forward, still untested for a fourth run**: the `2*min` both-feet gate on `rise`.
+- **Keep**: gamma 0.9985. It is not the cause of this failure and it fixed what it was aimed at.
+  The run was stopped before it could test whether a longer horizon helps a non-degenerate
+  reward, so that question is still open.
+
+### E30  2026-08-15  Exploration ran away and drowned the policy; the both-feet gate is untested
+- **Run**: get-up with `rise` gated on `2*min(left, right)` foot force instead of the sum.
+- **Stopped at iteration 900 by the pre-committed rule** ("torso not inverted" below 40% by iteration 1000). It was at **0.1%**.
+- **But the gate is not what failed.** Exploration std ran **0.79 -> 3.43** on an action range of [-1, 1], and eval return went **833 at iteration 300 -> 19 at iteration 900**. The policy drowned in its own noise before the gate could be judged either way.
+
+| | iteration 300 | iteration 900 |
+|---|---|---|
+| head high | 19.1% | **0.1%** |
+| torso not inverted | 5.7% | **0.1%** |
+| pelvis high | 26.2% | **0.8%** |
+| return | 833 | 19 |
+
+- **Cause**: `log_std_max = 5.0`, which is std 148 and therefore no ceiling at all, plus a positive `entropy_coef` and nothing pulling back. This is the SECOND run lost to log_std after E05, and in the opposite direction: E05 froze it above its ceiling, this let it escape.
+- **Fix**: `log_std_max` 5.0 -> 0.0, capping std at 1.0. Walking trained fine at 0.4-1.4. Verified safe: `torch.clamp` passes gradient 1.0 at exactly the boundary and 0.0 only strictly outside, and `clamp_log_std()` runs in place after every optimiser step, so the parameter can sit on the ceiling and still be pulled back down. That distinction is precisely what E05 got wrong.
+- **New Oracle check** `exploration_has_a_ceiling`, covering BOTH directions: a ceiling above std 2 is not a ceiling, and `init_noise_std` above the ceiling freezes the parameter from step one. Verified to bite on both.
+- **A defect in my own watching, worth as much as the run.** `getup_snapshot.py` rendered `best.pt`, which only moves on a new record. It froze at iteration 300 while the run was at 900, so for nine minutes I was looking at a 600-iteration-old policy and printing current metrics beside it. Switching to the newest checkpoint changed the picture instantly and for the worse. Watching the wrong object is worse than not watching.
+- **Carried forward untested**: the `2*min` foot gate. It removed 87% of `rise` for the previous policy and may still be too harsh, but this run cannot say.
+
+### E29  2026-08-15  The shaping was gamed in 200 iterations, by a headstand
+- **Caught by looking**, after the metrics showed an impossible combination: pelvis at 0.804 m (92% of standing) with the head at 0.322 of standing height. The head was BELOW the pelvis.
+- **The policy inverted.** Rendered frames: lying -> pike on hands and feet with the hips up -> balanced head-down with the legs in the air -> folded over. Measured on the resulting policy at 3.2 s: pelvis 0.71 m, head 0.14 m.
+- **My error, and the design note stated the opposite.** E28's comment claims the shaping "cannot reward standing on your hands". That is true of `rise`, which is multiplied by pelvis uprightness. The SHAPING had no gate at all: it paid for bare pelvis height, and inverting is the cheapest way to raise a pelvis. I wrote the guarantee for one term and applied it in my head to another.
+- **Fix**: `Phi = min(pelvis_height / standing_height, head_height_ratio)`. Both ends of the body must be off the floor, which is what upright means without touching orientation, and orientation is the thing that is not monotone along the path.
+- **Scored against the poses that policy actually found**:
+
+| pose | pelvis-only Phi | min(pelvis, head) |
+|---|---|---|
+| inverted | 0.81 | **0.09** |
+| pike / downward dog | 0.82 | 0.50 |
+| kneeling | 0.68 | 0.66 |
+| standing | 1.00 | 1.00 |
+
+The cheat collapses from nearly-standing to nearly-nothing; the honest poses barely move.
+- **Worth keeping**: this run was still the best yet on the thing it was fixed for. `knee_max` reached 1.10 against a hard ceiling of 1.057 in every earlier run, so the action-range fix (E27) is confirmed working. The humanoid is now physically capable of the poses a get-up needs; it just found a faster way to be paid.
+- **Lesson**: a guarantee proved for one term does not transfer to another term in the same function. Every positive needs its own gate, and I now have three instances of exactly this (E03 symmetry, E26 arm-prop, E29 shaping).
+
+### E28  2026-08-15  The sitting trap: `upright` rewards a pose that is NOT on the path
+- **Found before spending compute**, by computing the reward at each stage of a rise rather than watching another run fail.
+- **The defect is in the definition, not in a number.** `upright = clip(-gravity_body[2], 0, 1)` measures PELVIS ORIENTATION, which is **not monotone** along the path from floor to stand: maximal sitting, low on all fours and kneeling, maximal again standing. So the route out of a sit runs DOWNHILL, and both previous runs parked in exactly that sit (`pelvis_upright` 0.93, head 0.54, standing 0%).
+- Pelvis HEIGHT is monotone by geometry: an intermediate pose cannot lie outside the interval between lying (~0.15 m) and standing (0.877). It needs no verification, unlike orientation.
+- **Fix**: potential-based shaping on pelvis height, `F = gamma*Phi(s') - Phi(s)`, `Phi = root_height / standing_height`.
+- **Two sizing decisions, both from measurement rather than taste**:
+  - **Weight 150, not 5.** Sitting pays ~0.50/step and the intermediate poses ~0.20, so the route out costs ~0.30/step. Lifting the pelvis 0.35 -> 0.60 m in a second moves Phi by 0.00228/step, so covering the dip needs ~150. At 5 it would have been 0.011/step, three percent of the trap, and would have changed nothing.
+  - **gamma = 1.0, NOT ppo.gamma, and this breaks strict invariance deliberately.** At 0.99 and 125 Hz the `-(1-gamma)*Phi` drain dominates: measured, even rising at 0.3 m/s scored NEGATIVE at weight 5, and at a useful weight it costs 1.5/step just for being upright. At gamma = 1 the sum telescopes exactly, so the shaping over an episode is `weight * (Phi_end - Phi_start)` and nothing else: path length is irrelevant and pumping the pelvis up and down pays exactly zero.
+- **Guard**: an Oracle check fails any config where `weight * (1 - gamma)` exceeds 0.10/step. Verified to bite at gamma 0.99 ("costs 1.50/step") and stay quiet on the real config.
+- **Prediction on the record, before the run**: ~60% he sits and parks again, ~25% reaches occasional stands but cannot hold 2 s, ~15% real successes. The early tell is `knee_max` above 1.2, which the old action range made impossible (ceiling 1.05, peak 1.057).
+- **Also this session**: the ball was built, measured, and then switched off at the user's request; the pose bank was rebuilt with QUOTAS BY OUTCOME (425 each of prone/supine/side-left/side-right) because commanding an orientation is not enough, a body laid on its side often rolls onto its front as it settles.
+
+### E27  2026-08-15  The knee could not reach a kneel, and the fix was written but never connected
+- **Found by a person watching**: "he bends his knees, leans on his hands and heels, but I do not see him trying to rock or rise. As if he likes hanging there."
+- **Measured, and it is not a preference**:
+
+```
+knee joint range            [0.00, 2.79] rad
+COMMANDABLE ceiling          1.05 rad      (action_scale_mode = "fraction")
+a kneel needs               ~2.40 rad
+peak observed in the run     1.057 rad     <- the ceiling, to a hundredth
+```
+
+- **The action space could not express the pose.** The agents' spec said this in section 0.1 and I built `action_scale_mode="full_range"`, verified it gives 100% joint coverage against 56.2%, committed it, and **never plumbed it through**. `vec_env` called `prepare(model_path)` with no mode, so every run since silently kept the old mapping. Two get-up runs, 600M steps total, spent on a body that physically could not fold a leg under itself.
+- **Verdict**: WASTED. Not a slow-learning problem: no amount of training makes an inexpressible movement expressible.
+- **Honest caveat**: mean knee angle was 0.38 against the 1.05 ceiling, so the limit was not binding on average and part of the parking is still the reward. The PEAK sitting exactly on the ceiling is what proves the limit bit.
+- **Fix**: `env.action_scale_mode` plumbed through Config -> ThreadedVecEnv -> prepare(), and passed at all five construction sites. Knee now commandable to 2.79 rad; driving the action to +1.0 reaches 2.80. Walking stays on "fraction" and its runs are bit-identical.
+- **Guard added, because this is the third time**: the trainer now ASSERTS that the render env's `action_scale` matches the training env's. A render env with a different action mapping is a different robot, so every video would show behaviour the policy never produced. Same family as the 8-second episodes, the transposed actuators and the overlay printing a command the policy never received.
+- **Lesson**: building a capability and not wiring it is indistinguishable, from the outside, from not building it. The Oracle checks configs against each other; nothing checked that a config field reaches the code that consumes it.
+
+### E26  2026-08-15  Get-up run 1: sits up on one arm, never uses its legs
+- **Setup**: new GetUpTask, 300M steps, 1200-pose bank, 2 s hold, 13-conjunct standing predicate.
+- **Result**: got up to sitting and stopped. Best eval at iteration 2700: head 0.537, root 0.322, pelvis_upright 0.933, **standing 0.0%**, return 690 (of a ~3500 ceiling).
+- **Verdict**: WORSE than intended, and the failure was found by a person watching the video, not by any metric. Their description: "all the pressure on one hand, lifting his hip, raising one hand, drifts in circles, doesn't bend his knee."
+- **Measured, and it matched every word**:
+
+| | |
+|---|---|
+| left hand height | 0.469 m |
+| right hand height | 0.064 m |
+| at least one hand on the floor | 98% of the time |
+| BOTH hands down | 1% |
+| knee angle | 0.53 rad, max ever 1.06 (a kneel needs ~2.4) |
+| yaw drift | 58.7 deg/s, a full turn every 6 s |
+
+- **Root cause, and it is not the convexity I blamed earlier.** NOTHING in the reward required the legs to do anything. `upright` pays for pelvis verticality and `rise` for head height; a one-armed prop buys both without using a leg. The foot-force conjuncts (U7, U8) exist but gate only the STANDING terms, which pay zero for the entire approach, so the legs were irrelevant on the whole path from lying to standing. The cheapest way to raise the pelvis and head was to push with one arm, and the spin is that arm's reaction torque.
+- **Fix**: `rise` is now multiplied by foot load, ramped to full at 0.30 BW. Not a new term. This is the same device the design already uses to stop height bought by DIVING from paying (`rise` is multiplied by pelvis uprightness); the arm-propping hole was simply left open. A one-armed prop with unloaded feet now earns zero rise; the same posture with the feet under the body earns it in full.
+- **Also added**: `foot_load_bw`, `hand_height_gap`, `hands_down_frac`, `knee_max`, `spin_deg_s` to eval metrics. All five were invisible before, which is why this needed a human and a video. A defect that only a person can see is a missing metric.
+- **Lesson, general**: gating a reward on a state the policy must EARN is stronger than penalising the alternative. Every anti-cheat in this task that has held is a gate; every one that leaked was an unguarded positive.
+
+### E25  2026-08-14  Actuator order is NOT qpos order, and two live bugs came from assuming it is
+- **Found while designing the get-up task**, by agents measuring the model rather than reading comments.
+- **The fact**: on this humanoid, actuator `i` does NOT control `qpos[7 + i]`. On both legs `hip_y` and `hip_z` are transposed, so **4 of 28 actuators** disagree with that assumption:
+
+```
+actuator 15 right_hip_z -> qpos 23      qpos[7+15] is right_hip_y
+actuator 16 right_hip_y -> qpos 22      qpos[7+16] is right_hip_z
+actuator 22 left_hip_z  -> qpos 30      (same transposition)
+actuator 23 left_hip_y  -> qpos 29
+```
+
+- **Live bug 1, in the walking task we have been training all week.** The soft joint-limit penalty built its bounds from `actuator_ctrlrange` (actuator order) and indexed them against `state.qpos[:, 7:7+nu]` (qpos order). So **`hip_y`'s true +-2.44 rad range was scored against `hip_z`'s +-1.05 rad one**, at weight -5.0. The penalty therefore fired on deep hip flexion, which is exactly the motion a long stride requires, and we have spent the week fighting short strides (0.11 -> 0.30 m against a human 0.6-0.8).
+- **Honest size of the effect**: `reward/dof_pos_limits` measured -0.007/step, so it was not a large direct cost. Whether it acted as a barrier to the deeper flexion that never got tried is not established by that number, and I am not claiming it was.
+- **Live bug 2**, `tasks/tracking.py:181`: returns `lib.qpos[idx, 7:]` as an `action_offset`, which the engine applies in actuator order. Every tracked clip commands each `hip_z` servo the reference's `hip_y` angle and vice versa. The tracking task is not currently in use, so nothing downstream is contaminated, but it would have been.
+- **Fix**: `PreparedModel.actuator_qpos_adr` now carries the map, `vec_env` hands it to the task, and the limit penalty indexes through it. Verified: the map differs from the naive assumption on exactly 4 of 28 actuators, and the environment still runs with finite rewards.
+- **Rule**: anything pairing a per-actuator quantity (control range, target, action offset) with a joint angle must go through `actuator_qpos_adr`. Never `qpos[7 + i]`.
+
+### E24  2026-08-14  Abdomen exploration floor: INCONCLUSIVE, and I should have known before running
+- **Hypothesis**: the 48 degree backward waist fold persists because `abdomen_y` has the lowest exploration of all 28 action dimensions (std 0.196 against a mean of 0.889), so PPO never samples its way out.
+- **Design**: 2 arms (control, `explore_floor = -0.70` on abdomen dims 0/1/2) x 3 seeds x 350 iterations, warm-started from the envelope best.pt, all seven checkpoints scored under an identical held 1.0 m/s command.
+- **Result**, held-command scoring:
+
+| arm | torso_upright | | | mean | sd |
+|---|---|---|---|---|---|
+| control | 0.8275 | 0.7041 | 0.5589 | 0.697 | 0.134 |
+| floored | 0.3730 | 0.5389 | 0.7390 | 0.550 | 0.183 |
+| baseline (untrained warm start) | 0.6578 | | | | |
+
+- Difference (floored - control) = **-0.147, SE 0.131, t = -1.12 on ~4 df, 95% CI -0.51 to +0.22.** Spans zero comfortably.
+- **Verdict**: INCONCLUSIVE. The hypothesis is not supported, and it is not refuted either.
+- **The process failure, which is the real lesson.** With the control sd of 0.134, three seeds per arm can only detect an effect of about **0.38**. The effect I was chasing, from the open-loop counterfactual, was about **0.16**. The experiment was underpowered by more than a factor of two BEFORE it ran, and computing that takes one line of arithmetic I did not do. E22b had already warned me the noise on this machine is enormous; I applied that warning to the choice of metric and not to the sample size. Detecting 0.16 here needs roughly **17 seeds per arm**, about 6 hours.
+- **What DID come out of it, and it is worth more than the experiment.** All seven checkpoints, across both treatments and three seeds, fold **BACKWARD**, between 34 and 68 degrees, with a consistent leftward roll (lateral +0.31 to +0.46). Not one arm under any condition came out upright. So the backward-left fold is a **systematic property of this reward and this body**, not a random local optimum that a nudge to exploration could escape. That reframes the fix: it is structural, not exploratory.
+- **Also note**: control seeds span 0.559 to 0.828 on posture from byte-identical configs. E22b's noise floor is confirmed to apply to `torso_upright`, not just to episode return.
+- **Rule adopted**: compute the minimum detectable effect BEFORE launching any arm, and write it in the plan next to the predicted effect. If MDE > predicted effect, the experiment does not run.
+
+### E23  2026-08-14  The lean: three of my claims were wrong, and it is not a reward problem
+- **What I claimed**: the humanoid leans FORWARD at torso_upright 0.54, exploiting the termination boundary at 0.50, because the reward prices speed above posture roughly 2:1.
+- **All three are false.** Verified independently, not taken from the review:
+
+1. **Checkpoint mismatch.** `best.pt` is iteration 3100 with `torso_upright 0.726`. The 0.543 figure is iteration 5050, a later checkpoint with return 2328 and 29.7% falls that was never selected. I quoted its posture next to iteration 3100's return, speed and fall rate, describing a policy that does not exist.
+2. **The termination boundary is dead code.** `locomotion.py:1111-1112` sets `stooped = np.zeros_like(fallen)` and `head_down = np.zeros_like(fallen)`; the conformance audit removed posture termination. `terminate_torso_upright = 0.5` is read only by `tracking.py`. There is no cliff at 0.50, so nothing is hugging it.
+3. **The lean is BACKWARD, not forward.** Rolling out best.pt at a held 1.0 m/s and decomposing the torso z-axis in the heading frame: fore component **-0.640, forward in 0.0% of samples**; lateral +0.369, **left in 100%**; `abdomen_y = -0.755 rad`; tilt 48.5 degrees. It is a backward-and-left waist fold. `torso_upright = cos(tilt)` is SIGN-BLIND, so the metric cannot tell forward from backward and neither could I.
+
+- **The actual finding, and it inverts the diagnosis.** Paired counterfactual, same seed, abdomen actuator outputs scaled by alpha:
+
+| alpha | torso_upright | tilt | speed | **reward/step** |
+|---|---|---|---|---|
+| 1.00 | 0.658 | 48.9 deg | 0.694 | 3.377 |
+| **0.75** | **0.816** | **35.3 deg** | 0.693 | **3.507** |
+| 0.50 | 0.927 | 22.0 deg | 0.606 | 3.402 |
+| 0.25 | 0.978 | 12.0 deg | 0.561 | 3.289 |
+
+Straightening the trunk **raises total reward by +0.13/step at no speed cost**. The reward already prefers upright. The policy is sitting in a local optimum that its own reward function disprefers.
+
+- **Verdict**: the planned fix (steepen the posture term) was aimed at the wrong thing. This is not mispricing, it is an optimisation failure.
+- **Mechanism to test next**: PPO explores with i.i.d. per-step Gaussian noise, but the postural gain only materialises when an abdomen offset is HELD across a whole stride. Independent noise averages it away, so the improvement is never sampled coherently even though it is well inside the exploration range. If that is right, the fix is temporally correlated exploration on the abdomen dimensions, not a reward weight.
+- **Learned, generally**: a cosine-based uprightness metric cannot distinguish the direction of a tilt, and we shipped one as a reward term, a termination condition and a headline dashboard number. Any angular metric needs its sign checked before it is trusted.
+
+### E22  2026-08-14  Replay ratio 2 vs 16, and a finding that outranks it
+- **Change**: FastTD3 at replay ratio 2 and 16, both async, 50M env steps each, same seed, evals aligned to the same env-step grid.
+- **Result**: BOTH FLAT. 100% falls on all 96 evaluations across both arms.
+
+| env steps | ratio 2 | falls | ratio 16 | falls |
+|---|---|---|---|---|
+| 1.0M | 252 | 100% | 134 | 100% |
+| 13.3M | 316 | 100% | 563 | 100% |
+| 25.6M | 304 | 100% | 556 | 100% |
+| 44.0M | 398 | 100% | 483 | 100% |
+| best | 426 @ 17.4M | | 734 @ 3.1M | |
+
+- **Verdict**: WORSE. Replay ratio is not the deciding variable; the arms differ by less than the noise floor (see below) and both are far under PPO's 3034 at 7.4 s upright.
+- **Useful negative**: ratio-16 async tracked the earlier SYNC run point for point, so the async collector changes speed and not learning. That part is confirmed sound.
+
+### E22b  2026-08-14  **The noise floor: identical configs, 7.6x different outcomes**
+- **Found while adversarially reviewing an experiment design.** `runs/arm-warm-20260813-180357` and `runs/arm-warm-20260813-181716` have byte-identical `config.yaml` (verified by `diff`), the same `run.seed: 0`, the same warm start and the same 350 iterations.
+
+| | 180357 | 181716 |
+|---|---|---|
+| mean training return, iters 101-350 (n=245) | **323.2** | **2451.4** |
+| mean episode length | 133.5 | 789.8 |
+
+- One collapsed into the 100%-falls attractor; one held the walk. **Same settings, same seed.** Threaded physics across 10 workers and MPS kernels are both non-deterministic, so a seed does not pin a trajectory here.
+- **Verdict**: this is the single most important measurement in the logbook, because it sets the bar every other entry must clear.
+- **What it invalidates**: any conclusion drawn from comparing the TRAINING OUTCOME of two single runs where the effect was smaller than roughly 7x. That includes several claims in earlier entries.
+- **What it does NOT invalidate**: mechanical facts measured directly rather than through training. E14's `commanded_speed 0.38 -> 0.70` is a property of the sampler, verified by drawing 200k commands. E16's eval bias was proven by re-scoring fixed checkpoints. E21's throughput numbers are wall-clock. Those stand.
+- **How to apply**: an outcome comparison needs multiple seeds, or a within-run paired measurement, or an effect larger than 7x. A single-run A/B on final return cannot support a conclusion on this machine.
+
+### E22c  2026-08-14  Reward scale was NOT killing the off-policy arm
+- **My hypothesis, now disconfirmed.** I argued that 21 unnormalised reward terms spanning 0-3000 were overloading the TD3 critic, since PPO normalises advantages and is scale-invariant while TD3 is not.
+- **Measured on the ratio-2 best checkpoint**: mass on the top atom **4.7e-16** (saturation would be near 1.0), mass on the bottom atom 6.6e-17, **65 of 401 atoms in use**, E[Q] = 210 against a realised discounted return of the same order.
+- **Verdict**: the critic is fitting cleanly and is nowhere near saturated. Reward normalisation would not have fixed anything. Experiment dropped BEFORE spending compute on it.
+- **Also corrected**: the `value resolution` sub-check I added to the Oracle was wrong and has been removed. It warned that coarse atoms mean "one step of improvement may not move the target". False: the categorical projection is exactly mean-preserving and the actor consumes only `E[Q] = sum(p*z)`, which is continuous in the probabilities at any atom spacing. Coarse atoms limit the representable SHAPE of the distribution, not the quantity the policy gradient uses. A wrong check is worse than no check.
+
+### E21  2026-08-14  Async collector: overlap physics and gradients
+- **Change**: `humanoid_rl/algos/async_collector.py`. Environment stepping moves to a background thread; the learner owns the replay buffer exclusively and the actor holds a policy snapshot. Enabled by `fasttd3.async_collection`.
+- **Why**: Phase 0 measured that CPU physics and Metal updates barely interfere (CPU keeps 91.5%, GPU 100.3% concurrent), yet every trainer alternated them strictly. Only legal off-policy; PPO must stop the world for on-policy data.
+- **Prediction** (before the run): overlap should give `max(physics, gradients)` instead of the sum, so up to 1.17x at replay ratio 16 and 1.75x at ratio 2.
+- **Result**, four arms all at exactly 1.23M env steps:
+
+| replay ratio | sync | async | gain | vs theory |
+|---|---|---|---|---|
+| 16 | 12,244 sps | 13,158 sps | +7% | 92% of the 1.17x available |
+| 2 | 45,927 sps | 61,386 sps | +34% | 76% of the 1.75x available |
+
+- **Verdict**: WORKED, and smaller than it first appeared. Overlap pays in proportion to how BALANCED the two sides are. At ratio 16 the GPU takes 295 ms against physics' 49, so there is only 14% to reclaim no matter how good the implementation is.
+- **Bug caught in my own benchmark**: the first async arm reported 55,262 sps, a 4.5x "speedup". It was fake. `drain()` took the whole queued backlog, so the actor ran 8x ahead of the learner and the configured replay ratio of 16 silently became 1.9. The giveaway was the step counts not matching: 13.4M env steps against the sync arm's 1.6M for the same 400 iterations. Fixed by taking exactly the requested steps and shortening the queue to 4 for backpressure.
+- **Learned**: throughput comparisons between RL configurations are meaningless unless the replay ratio is pinned and verified afterwards. Ratio is not a tuning detail, it is the axis the whole comparison sits on.
+- **Open, and now the important question**: ratio 2 async runs at 61,386 sps, faster than PPO's 50,244 while still reusing every transition twice. Whether ratio 2 LEARNS as well per environment step as ratio 16 is untested here and the FastTD3 paper argues the opposite. That is the next experiment.
 
 ### E20  2026-08-14  Curriculum collapsed to its floor  **(live, and my own fault)**
 - **What happened**: difficulty went 0.70 → 0.67 → 0.52 → **0.50 (floor) by iteration 150** and has been pinned there for 500 iterations. Commanded speed fell to 0.36-0.40 m/s, which is exactly the crawl E14 existed to fix.

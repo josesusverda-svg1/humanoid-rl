@@ -1,0 +1,445 @@
+# ROUGH TERRAIN, Phase 4. Copied from final.yaml (the flat run) on 2026-08-17 and changed
+# in exactly two places: a `terrain:` section, and the step budget. NOTHING about the
+# objective moves -- not a reward weight, not a sigma, not a threshold, not the observation.
+# That is deliberate: every reward change in this project's history produced an exploit or
+# NO EFFECT, while its only two clean WORKED verdicts were optimiser fixes. Terrain is a
+# change to the WORLD, and it is the only change here, so the result is readable.
+#
+# Original header follows.
+#
+# THE FINAL RUN. Copied from default.yaml on 2026-08-16 and changed in ten places, every
+# one of them a defect this project already measured and then fixed only on the get-up
+# track. See LOGBOOK E50.
+#
+# `scripts/oracle.py --config configs/default.yaml` exits 1 with TWO contradictions and has
+# done so for the whole life of that file. The locomotion track -- the one the README says
+# this project is for -- has never once been trained under a configuration its own invariant
+# checker accepts. This file is that configuration.
+#
+# Single source of truth for a training run.
+# Snapshotted into the run directory at startup, so every checkpoint carries the exact
+# configuration that produced it.
+#
+# Numbers here are tuned for an Apple M3 Max (10 performance cores, 30 GPU cores, 96 GB
+# unified memory). Fields set to `null` are detected at runtime, which keeps this file
+# portable to other Apple Silicon machines without edits.
+
+run:
+  name: terrain-warm
+  # E22b: two runs with byte-identical configs and `seed: 0` in BOTH diverged at iteration
+  # 3 (grad_norm 268.07 vs 289.49) into a 7.6x outcome gap, 322.9 against 2455.0 mean
+  # return. E31 retracted that finding on a get-up pair that WAS reproducible, but the
+  # locomotion pair still stands and both arms of it ran the low-noise exploration settings
+  # this file uses, so the fix below does not dissolve it. A single draw is a lottery
+  # ticket. This is segment 1 of a planned 2-3; segments differ only in this number.
+  seed: 0
+  # auto -> mps when available. Phase 0 measured torch on CPU as 4x to 5x slower here,
+  # and it would also steal cores from the physics threads.
+  device: auto
+  # 500M was a 2.84 HOUR run, measured: runs/envelope-20260814-100402 did 499,974,144 steps
+  # in 2.295 h. Every locomotion conclusion in this project rests on runs of that length,
+  # and the longest run in project history is 5.29 h. At horizon 60 an iteration is 245,760
+  # steps and ~4.7 s, so 2.8B = 11,393 iterations = ~14.9 h, which is one segment of a
+  # multi-day budget rather than a morning.
+  total_env_steps: 2_800_000_000
+  output_dir: runs
+
+env:
+  model_path: humanoid_rl/models/humanoid_scene.xml
+  # 4096 envs x 24 horizon = 98,304 steps per iteration. Large batches are what make
+  # on-policy PPO stable, and 96 GB of unified memory makes the storage cost irrelevant.
+  num_envs: 4096
+  num_workers: null        # null -> one per performance core (10 on this machine)
+  decimation: 4            # 500 Hz physics / 4 = 125 Hz policy
+  # 2500 steps x 8 ms = 20.0 s, matching legged_gym's episode_length_s = 20.
+  #
+  # Was 1000, with the comment "20 s at 50 Hz". Both halves of that were wrong about this
+  # project. legged_gym runs 200 Hz physics with decimation 4, so its control loop is 50 Hz
+  # and its 1000 steps really are 20 s. Ours is 500 Hz physics, decimation 4, so 125 Hz and
+  # 1000 steps is 8.0 s. The step COUNT was copied across without converting for a control
+  # loop 2.5x faster, and the humanoid has been getting 8 seconds per attempt where the
+  # reference gives 20.
+  #
+  # The second consequence was the one worth catching. command_hold_range is 8-12 s, longer
+  # than the whole 8 s episode, so the command essentially never changed while the humanoid
+  # walked: about 0.8 commands per episode. That parameter was set to the reference's value
+  # against an episode length we did not have, so the defect its comment claims to fix (a
+  # policy that has never seen its command change mid-stride, which is every step of a
+  # navigation layer) was still fully present. At 20 s the same 8-12 s hold yields the ~2
+  # commands per episode legged_gym gets.
+  #
+  # NOTE when comparing runs across this change: "survived the episode" is now a 2.5x harder
+  # bar, so fall rate steps up discontinuously and is not comparable to earlier runs. The
+  # abort-rule thresholds in scripts/watch_abort_rules.py are raw step counts and were
+  # rescaled with it.
+  max_episode_steps: 2500
+
+network:
+  # Small on purpose. Locomotion does not need depth, and Phase 0 showed physics, not the
+  # network, dominates runtime.
+  actor_hidden: [512, 512]
+  critic_hidden: [512, 512]
+  activation: elu
+  # 0.45, BELOW the log_std_max ceiling of exp(-0.70) = 0.4966. Starting above a clamp is
+  # E05 verbatim: torch.clamp passes no gradient outside the range, so the parameter freezes
+  # at a value the run never chose, and that cost 610 iterations once already. The envelope
+  # run's own action_std at iteration 1 was 0.389, so this is inside the observed regime.
+  init_noise_std: 0.45
+
+ppo:
+  # 24 steps is 0.192 s of experience at 125 Hz, against 0.48-0.60 s at every 50 Hz
+  # reference this project copied its constants from. E31b logged that and never fixed it.
+  # 60 steps = 0.48 s, the low end of the references.
+  #
+  # It is not a free third variable, it is a REQUIRED co-change with gamma. The value
+  # target's composition is gamma^horizon: at 0.997 with horizon 24 that is 0.93, i.e. 93%
+  # of the target is the critic's own bootstrap rather than observed reward. Horizon 60
+  # brings it back to 0.835, which is where the old 0.99/24 combination sat (0.79).
+  #
+  # Cost: an iteration becomes 245,760 env steps and ~4.7 s instead of 98,304 and 1.93 s.
+  horizon: 60
+  # ORACLE CONTRADICTION on default.yaml, and the reason this file exists. gamma is a
+  # HORIZON IN SECONDS, not a number. 0.99 at 125 Hz buys 1/(1-g) = 100 steps = 0.80 s.
+  # legged_gym, HumanUP and unitree_rl_gym all run 0.99 at 50 Hz, where it buys 2.0 s. We
+  # copied the constant, not the quantity. E31 found this and fixed it in configs/getup.yaml
+  # ONLY; the locomotion config, which is what the project is actually for, kept the 0.80 s
+  # horizon through every run in its history.
+  #
+  # A gait cycle at gait_frequency 0.9 is 1.111 s, so at 0.99 one full cycle is discounted
+  # to 0.2476 -- the agent is being asked for a walk it cannot see the end of. 0.997 is
+  # 2.67 s, 2.4 gait cycles, and it spans the ~1 s between a postural commitment and the
+  # fall that commitment causes. The oracle's own floor is 0.9964; this takes margin over it
+  # rather than meeting it to the last decimal (the 0.998-vs-0.9985 lesson from E32).
+  #
+  # NOT get-up's 0.9985 (5.33 s). That was sized for a 4 s rise plus a 2 s hold, a
+  # requirement walking does not state, and a longer horizon costs critic variance.
+  #
+  # Truncation is safe: ppo.py bootstraps V on time-limit truncation and zeroes it only on
+  # real terminations, and train.py additionally bootstraps across every mid-episode command
+  # change. Treating a time limit as terminal would bias the return in proportion to the
+  # horizon; it does not.
+  gamma: 0.997
+  # LEFT AT 0.95 DELIBERATELY, and it is the largest known defect remaining in this file.
+  # Credit for OBSERVED reward decays at gamma*lambda: 0.9471 -> 18.9 steps = 0.151 s here,
+  # against ~0.333 s at the references. That is the same rate-copy bug class as gamma. It is
+  # left in because it has no logbook entry and no oracle check, and raising it raises
+  # advantage variance -- one novel high-variance lever is enough for a last run. Horizon 60
+  # does make it usable: a 60-step rollout captures 96.2% of this credit window against
+  # 72.8% at horizon 24. Pre-registered as the named residual if prediction 7 fails.
+  gae_lambda: 0.95
+
+  learning_rate: 1.0e-5
+  num_epochs: 5
+  # 245,760 / 10 = 24,576, identical to the minibatch every locomotion run to date used
+  # (4096 x 24 / 4). Leaving this at 4 alongside horizon 60 would silently make the
+  # minibatch 61,440 and change the gradient-noise scale as a hidden second variable.
+  # This keeps optimiser steps per env step constant, so horizon is the only thing moving.
+  num_minibatches: 10
+  clip_ratio: 0.2
+  value_loss_coef: 1.0
+  # KEPT at 0.01, against the comment above it and against the first draft of this file.
+  #
+  # The comment argues for zero on the grounds that an entropy bonus drives log_std into its
+  # ceiling and the ceiling is a gradient sink. The first half is right and the second half
+  # is E05's mistake restated: `clamp_log_std()` runs IN PLACE after every optimiser step,
+  # so the parameter can sit exactly ON the ceiling and still be pulled back down. E30
+  # verified precisely that distinction, and E31 then measured the pairing that is written
+  # here -- a binding ceiling WITH a positive bonus -- producing action_std of exactly 1.000
+  # at every single check, and a verdict of WORKED.
+  #
+  # Setting it to zero instead would make the ceiling inert: with init 0.45 below the
+  # ceiling and no bonus pushing up, std can only fall, and eleven earlier runs in runs/
+  # already did exactly that (0.496 -> 0.288). That configuration is not the E30 fix, it is
+  # the absence of the problem. Held as the pre-registered alternative for segment 3.
+  entropy_coef: 0.01
+  max_grad_norm: 1.0
+  clip_value_loss: true
+
+  # Penalty on the policy MEAN leaving [-1, 1]. Without it the env clips actions and
+  # nothing pushes back, so an out-of-bounds mean is a free "max effort" strategy. A run
+  # without this reached mean |action| 2.3 (max 22.8) with 71% of components out of range:
+  # training kept improving while deterministic eval collapsed from 30% to 100% falls,
+  # because the policy had learned to rely on its own exploration noise as a controller.
+  bounds_loss_coef: 1.0  # T1-scale; 10.0 was ours
+  # Exploration noise ceiling, as log(std). -0.70 is std 0.50.
+  #
+  # Was 0.0 (std 1.0) on an action range of [-1, 1], which is enormous: measured on this
+  # project's own checkpoint by rescaling noise at rollout time, std 1.0 earned 1.148
+  # reward/step against 1.802 at std 0.5, 2.087 at std 0.25 and 2.239 deterministic. The
+  # noise was destroying 49% of the reward and PPO was optimising the degraded policy.
+  # Half of that loss came from two terms that are pure noise taxes, ang_vel_xy and
+  # action_rate, the latter being iid per-step noise no policy can reduce except by
+  # shrinking sigma.
+  # ORACLE CONTRADICTION on default.yaml, the second reason this file exists: 5.0 is std
+  # 148.4 on an action range of [-1, 1], which is not a ceiling at all. E30 lost a whole run
+  # to it (std 0.79 -> 3.43, eval return 833 -> 19) and E31 fixed it -- in configs/getup.yaml
+  # only. The locomotion config kept 5.0, and it shows in the run that produced the current
+  # best.pt: action_std went 0.389 -> 1.447 monotonically over 5,086 iterations,
+  # r(iteration) = +0.954, while torso_upright fell 0.961 -> 0.543, r = -0.851. The best
+  # checkpoint is from iteration 3,100 and every eval after it is worse.
+  #
+  # -0.70 is std 0.4966, which is what the measurement in the comment above argues for and
+  # what that comment's own file then failed to set. Not get-up's 0.0 (std 1.0), because
+  # 1.0 lands exactly in the measured 49%-reward-destroying regime.
+  log_std_max: -0.70
+
+  # The learning rate is driven by measured KL divergence rather than a fixed schedule,
+  # which is far more robust across changing reward scales.
+  # 0, NOT 30. Measured in E56's four-arm experiment: the warmup neither causes nor prevents
+  # the warm-start blow-up, it only moves it from iteration 1 to iteration 31 and lands it 1.4x
+  # harder. C (no warmup, lr 1e-5) beat D (warmup 30, lr 1e-5) on episode length, 1880 vs 1765,
+  # with one fewer moving part.
+  #
+  # The ORIGINAL note is kept below because it is the reasoning that was wrong, and this file
+  # is the place a reader looks for why:
+  # --init-from loads POLICY WEIGHTS ONLY with a fresh optimiser (train.py:876), so the value
+  # function arrives untrained against a world that just changed under it. E38 measured the
+  # failure this prevents: approx_kl 24.45 at iteration 1 on a warm start, which slams the
+  # adaptive learning rate to its floor and wastes the opening of the run. Terrain makes it
+  # strictly worse than E38's case, because the reward is unchanged but the STATE
+  # DISTRIBUTION is not -- the critic's predictions are stale for a reason it cannot see.
+  # ppo.py:429 also holds the LR controller off until warmup finishes, so the two interact.
+  critic_warmup_updates: 0
+  adaptive_lr: true
+  desired_kl: 0.01
+  lr_min: 1.0e-5
+  lr_max: 1.0e-2
+
+  normalize_advantage: true
+  obs_clip: 10.0
+
+task:
+  # Velocity command ranges, resampled each episode. These are the SEMI-AXES of the
+  # elliptical sampling envelope, not independent per-axis ranges, so the lateral value sets
+  # the reach at every off-axis heading and not just at 90 degrees.
+  #
+  # That is how the previous values did their damage. At lateral 0.4 the ellipse was crushed
+  # everywhere except dead ahead (a 30 degree heading reached only 0.73 m/s), and the median
+  # moving command came out at 0.38 m/s against human walking at 1.2-1.4 and the mocap clips
+  # at 0.52-1.24. Three consecutive 500M-step runs then produced a 0.20 m/s shuffle, which
+  # was obedience rather than a gait defect, and every gait metric was read as the failure.
+  #
+  # 0.8 backward and 0.6 lateral are the LocomotionTaskConfig defaults, checked against the
+  # retargeted mocap (forward p95 1.44 m/s, lateral p95 1.09) and against human data, where
+  # preferred backward and lateral speeds run about 60% and 40% of forward. Forward stays at
+  # 1.5 deliberately: above the mocap p95 the AMP discriminator would have no real example
+  # at the commanded speed, which is a defect this project has already paid for once.
+  lin_vel_x_range: [-0.8, 1.5]
+  lin_vel_y_range: [-0.6, 0.6]
+  ang_vel_yaw_range: [-1.0, 1.0]
+  # See LocomotionTaskConfig.forward_bias_prob. Raising the envelope alone still left only
+  # 6.8% of commands asking for 1.0 m/s or more forward; this takes it to 20.2%.
+  forward_bias_prob: 0.4
+  forward_cone_deg: 30.0
+  # Some episodes command a full stop, so the policy learns to stand still. Without this
+  # a policy often cannot stop, which breaks waypoint arrival in Phase 5.
+  zero_command_prob: 0.05
+
+  w_lin_vel: 1.0
+  w_ang_vel: 0.5
+  w_upright: 0.3
+  w_height: 0.3
+  # Torso, not pelvis. Without these the policy folds forward at the waist and lurches:
+  # pelvis level and at the right height, every other term satisfied, torso horizontal.
+  # Found by watching a video at 24.6M steps; the metrics looked excellent.
+  w_torso_upright: 0.6
+  w_head_height: 0.3
+  w_alive: 0.5
+  w_torque: -1.0e-5   # XBot scale; T1's -2e-4 drowned our positive budget (measured -9.4/step)
+  w_action_rate: -0.01
+
+  sigma_lin_vel: 0.25
+  sigma_ang_vel: 0.25
+  sigma_height: 0.02
+
+  # target_height and terminate_height are overwritten at load time from the prepared
+  # model's measured standing height (0.877 m), so these are only fallbacks.
+  target_height: 0.877
+  terminate_height: 0.55
+  max_tilt: 0.7
+  terminate_torso_upright: 0.5   # end episode if the torso tips past 60 degrees
+  terminate_head_ratio: 0.65     # end episode if the head drops below 65% of standing
+
+  w_feet_air_time: 1.0
+  w_flight: -0.3
+  w_feet_slip: -0.2
+  # --- rhythm, added after a human watching a video described the gait as "walking like a
+  # horse": a fixed split stance with the right foot locked 36 cm in front, both feet
+  # pattering 7.4 times a second while the body rocked over them. Measured, it swapped which
+  # foot led only 0.42 times a second against 7.4 foot strikes; in a real walk those are
+  # equal. Velocity tracking, air time, slip, symmetry and uprightness were all satisfied.
+  w_gait_phase: 1.0
+  # Off. It was meant to keep the clock-authority input alive for a future jump or crouch,
+  # but the ablation showed every arm collapsing regardless and this one is unproven. It can
+  # be reintroduced when there is a skill that needs it, with evidence.
+  free_gait_prob: 0.0
+  gait_frequency: 0.9      # strides/s -> 1.8 foot strikes/s, human walking cadence
+  stance_fraction: 0.6     # -> 0.20 double support, 0.00 flight, both human
+  # --- vertical bounce. The same policy pogoed 10.0 cm peak-to-peak against a human's 4-5,
+  # with vertical speed peaking at 1.17 m/s, because nothing in the reward opposed it. The
+  # height term scores POSITION and a body can oscillate hard while averaging exactly right.
+  w_vertical_vel: -0.8
+  w_ang_vel_xy: -0.05
+  # --- going where it was pointed. A policy told to walk straight forward drifted 47 degrees
+  # in 11 seconds and finished 2.6 m to the side, with sideways speed at 53% of forward,
+  # while scoring well on every velocity term. Two reasons, both fixed:
+  #   * sideways error shared one saturating exponential with forward error, so it was
+  #     tradeable; it now has its own narrow kernel
+  #   * the command is a turn RATE, so "0" never meant "keep facing that way", and the
+  #     policy could not even SEE its heading error. It is now in the observation.
+  # w_lateral_vel / sigma_lateral_vel / w_heading / sigma_heading DELETED, not retuned.
+  # They are read by nothing. `reward_term_names` has 21 entries and contains no lateral or
+  # heading term, and `reward_batch` still computes ONE shared squared error
+  # (vx-cmd_x)^2 + (vy-cmd_y)^2 -- which directly contradicts the comment above claiming
+  # sideways error "now has its own narrow kernel". They survive only as dataclass fields.
+  # A file that calls itself the single source of truth should not carry four weights that
+  # do nothing.
+
+  # Radial command difficulty. These keys were ABSENT from default.yaml, so they fell
+  # through to the LocomotionConfig defaults of 0.75/0.75, at which the median moving
+  # command is 0.529 m/s and only 3.4% of commands ask for 1.0 m/s or more -- below the
+  # oracle's own 0.60 m/s crawl threshold, which could not see it because the check
+  # hardcodes difficulty 1.0. The run that produced the current best.pt used 1.0/1.0.
+  # Writing them explicitly also pins the curriculum inert, which sidesteps the fact that
+  # curriculum state is not checkpointed and so would silently reset on any resume.
+  difficulty_init: 1.0
+  difficulty_min: 1.0
+
+
+  # Only the STANDING fallback now: when the gait clock is running the reward derives the
+  # swing target from it as (1 - stance_fraction) / frequency. Set to match the nominal
+  # schedule so the two can never disagree again, which they silently did for a whole run.
+  air_time_target: 0.44
+
+  joint_pos_noise: 0.02
+  joint_vel_noise: 0.02
+
+domain_rand:
+  # Varying the world during training stops the policy exploiting one exact set of physical
+  # constants. Matters even staying in simulation, because Phase 4 changes the ground.
+  enabled: true
+  # Distinct randomised models. One MjModel copy is 5.2 MB, so per-env copies would cost
+  # 21 GB; envs are assigned a pool entry at reset instead. 64 entries is about 334 MB.
+  model_pool_size: 64
+
+  friction_range: [0.5, 1.25]      # ground sliding friction, the biggest lever on gait
+  mass_scale_range: [0.85, 1.15]
+  com_offset: 0.015                # metres
+  kp_scale_range: [0.85, 1.15]
+  kd_scale_range: [0.85, 1.15]
+  armature_scale_range: [1.0, 1.1]
+
+  # Sensor noise, applied to the observation only. Physics, rewards and terminations still
+  # see ground truth.
+  obs_noise_joint_pos: 0.01        # rad
+  obs_noise_joint_vel: 0.15        # rad/s
+  obs_noise_gravity: 0.02
+  obs_noise_lin_vel: 0.05          # m/s
+  obs_noise_ang_vel: 0.10          # rad/s
+
+  push_interval_s: 5.0             # mean seconds between shoves, 0 disables
+  push_vel_xy: 0.7                 # m/s impulse magnitude
+
+eval:
+  # 100, not 50. An iteration is 2.4x longer now, so 50 would sample the same wall-clock
+  # more finely for no gain: in the plateau region eval fall_rate has sd 0.215 (CV 47.6%),
+  # so extra evals buy noise, not information. 11,393 iterations still gives 114 evals.
+  interval_iterations: 100
+  # 64, not 32. The evaluator already runs one episode per eval env and there are 64 of
+  # them, so 32 was a false statement in a file that calls itself the source of truth.
+  # Zero behavioural change -- this makes the number honest, and E16 is the reason that
+  # matters: an eval that counted 32 of 64 episodes counted the FALLS, and invalidated
+  # every fall rate, episode length and best.pt choice in project history.
+  num_episodes: 64
+  num_envs: 64
+  # Rendering costs about 1.3x realtime, so this adds roughly 3 percent to a run.
+  # Set video_every_n_evals to 0 to disable periodic videos entirely.
+  video_every_n_evals: 5
+  video_on_best: true
+  video_width: 640
+  video_height: 480
+  video_fps: 50
+  keep_last_videos: 12
+
+log:
+  checkpoint_interval_iterations: 100
+  # 200, not 5. At interval 100, keeping 5 retains 500 iterations, which is 4.4% of this
+  # run; E40 already lost a run's probe history to exactly that. The deliverable here is
+  # chosen post hoc from the retained history, not from best.pt, because best.pt tracks
+  # eval return and the thing being judged is posture. 200 x ~7.7 MB = 1.5 GB per segment
+  # against 857 GB free.
+  keep_last_checkpoints: 200
+  log_interval_iterations: 1
+
+# ---------------------------------------------------------------------------------------
+terrain:
+  enabled: true
+  # THE cost dial. Collision cost is set by cell size alone and is independent of the
+  # field's extent -- measured single-thread mj_step ratio against a plane: 0.200 m -> 1.22x,
+  # 0.150 m -> 1.26x, 0.100 m -> 1.79x, 0.075 m -> 1.97x, 0.050 m -> 3.25x.
+  #
+  # 0.10 m is chosen on the MINIMUM contact count, not the median. At 0.15 m a box foot rests
+  # on a median of 3 contacts but a MINIMUM of one, and a foot on a single contact point
+  # cannot transmit ankle torque from the ground -- a policy learning against that at a
+  # measurable fraction of footfalls is learning against a degenerate foot. At 0.10 m the
+  # minimum is 2. Below 0.075 m the disturbance stops growing and only the cost does.
+  cell: 0.10
+  # Extent is free in physics, so it is sized purely by the travel envelope: 1.5 m/s max
+  # forward command x 20.0 s episode = 30.0 m, times the measured achieved/commanded ratio
+  # ~0.79 = ~23.8 m. Spawns are inside +-12 m, so the worst reachable radius is ~38 m
+  # against 40. Off the field there is NO GEOM and the humanoid falls into the void, which
+  # would be recorded as an ordinary fall -- hence an Oracle invariant, not a comment.
+  half_extent: 40.0
+  # Peak-to-peak relief. 14 cm, NOT the 5.25 cm this file was launched with once.
+  #
+  # THE 5.25 FIGURE CAME FROM AN ARGUMENT THAT MEASUREMENT REFUTED. The claim was that past
+  # ~7 cm the terrain rather than the policy loses `gait_phase` (27.8% of the reward budget),
+  # so 5.25 took 0.75 of that "ceiling". Measured on E54's walker, deterministic, held
+  # 1.0 m/s, 64 envs x 400 steps -- gait_phase reward per step against peak-to-peak relief:
+  #
+  #    0.00 cm -> 0.8054      9.00 cm -> 0.7802      20.00 cm -> 0.6957
+  #    5.25 cm -> 0.7967     14.00 cm -> 0.7242
+  #
+  # At 20 cm, FOUR TIMES the supposed ceiling, gait_phase falls 13.6%. The clock is not taken
+  # away, and torso_upright barely moves either (0.527 -> 0.515). What rough ground actually
+  # costs is SPEED: lin_vel goes 0.584 -> 0.299, a 49% loss at 20 cm. The ceiling argument
+  # predicted the wrong quantity would break, so it cannot be used to pick the number.
+  #
+  # The number is picked from zero-shot difficulty instead -- what E54's walker does on each
+  # field with no training at all:
+  #
+  #    p2p       falls     steps survived of 600
+  #    0.00 cm    0.0%      600      flat, the control
+  #    5.25 cm    6.2%      591      the policy already solves 94% of it: little to learn
+  #    9.00 cm    9.4%      573
+  #   14.00 cm   35.9%      523      hard, and 64% of episodes still survive
+  #   20.00 cm   64.1%      427      the warm start is starting to be off-distribution
+  #
+  # 14 cm is where there is real work to do while the warm start is still on-distribution.
+  # At 5.25 the run would most likely have returned NO EFFECT and I would have called the
+  # terrain "solved". Credit where due: the user said it did not look rough, which is what
+  # sent me to measure an argument I had been treating as settled.
+  amplitude_p2p: 0.14
+  correlation_short: 0.35   # the measured stride, so the ground changes between footfalls
+  correlation_long: 1.20
+  long_weight: 0.25
+  clip_sigma: 2.5
+  # A flat disc at the origin for exactly one reason: _compute_standing_height and
+  # _verify_pd_holds_pose both run the humanoid at x = y = 0, and this makes prepare()
+  # bit-identical to a plane run. Verified: standing_height agrees to all 16 digits.
+  flat_disc_radius: 2.0
+  # SHARPNESS 1.0: ridged, with creases and facets rather than rolling waves.
+  #
+  # At equal amplitude, measured on the compiled grid: slope p95 15.3 -> 24.6 deg, max
+  # 39.6 -> 50.9, curvature p95 2.20 -> 4.19, stride-to-stride change 4.91 -> 7.82 cm, and
+  # zero-shot falls for the warm-start policy 35.4% -> 49.0%.
+  #
+  # Sharpened by SHAPE, not by shortening the correlation length. Dropping correlation to
+  # 0.15 m reaches a similar slope (21.3 deg p95) but makes the features 1.5 cells wide,
+  # narrower than the foot's 0.090 m short axis, so a box foot lands on a single contact
+  # point -- the line-contact defect box feet exist to avoid (README.md:66). The ridged
+  # transform instead RAISED contacts per foot, 2.8 -> 3.2 measured in a rollout, because it
+  # steepens the transitions while leaving the feature SIZE to `correlation_short`.
+  sharpness: 1.0
+  spawn_half_extent: 12.0
+  seed: 0

@@ -221,7 +221,22 @@ class ActorCritic(nn.Module):
         value = self.critic(obs_norm).squeeze(-1)
         return action, log_prob, value
 
-    @torch.no_grad()
+    #: Per-dimension exploration floor: (indices, min log_std). Empty means no floor.
+    #:
+    #: Exists because exploration can collapse on ONE dimension while the rest are healthy,
+    #: and a scalar floor cannot express that. Measured on the best PPO policy: abdomen_y
+    #: had std 0.196, the LOWEST of all 28 actuators against a mean of 0.889 and a max of
+    #: 3.172, while its action sat pinned at -0.943. Those are exactly the joints holding
+    #: the torso in a 48 degree backward fold that the reward itself disprefers: scaling the
+    #: abdomen outputs to 0.75 raises reward 3.377 -> 3.507 per step at identical speed.
+    explore_floor_dims: tuple[int, ...] = ()
+    explore_floor: float = -5.0
+
+    def set_explore_floor(self, dims, min_log_std: float) -> None:
+        self.explore_floor_dims = tuple(int(d) for d in dims)
+        self.explore_floor = float(min_log_std)
+        self.clamp_log_std()
+
     @torch.no_grad()
     def clamp_log_std(self) -> None:
         """Pull log_std back inside its range, in place.
@@ -231,6 +246,10 @@ class ActorCritic(nn.Module):
         forward pass zeroes its gradient.
         """
         self.log_std.clamp_(-5.0, self.log_std_max)
+        if self.explore_floor_dims:
+            idx = torch.as_tensor(self.explore_floor_dims, device=self.log_std.device)
+            flat = self.log_std.view(-1)
+            flat[idx] = flat[idx].clamp_min(self.explore_floor)
 
     def act_deterministic(self, obs: torch.Tensor) -> torch.Tensor:
         """The distribution mean, with no exploration noise. Used for evaluation and video."""

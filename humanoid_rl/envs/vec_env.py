@@ -87,17 +87,26 @@ class ThreadedVecEnv:
         decimation: int = 4,
         max_episode_steps: int = 1000,
         action_filter_hz: float = 8.0,
+        action_scale_mode: str = "fraction",
         seed: int = 0,
         domain_rand: DomainRandConfig | None = None,
+        stagger_initial_episodes: bool = False,
+        terrain=None,
     ) -> None:
         # Loads the MJCF, converts its torque motors into PD position servos, derives the
         # standing pose, and adds foot touch sensors. See envs/model_prep.py.
-        self.prepared = prepare(model_path)
+        # Terrain, when enabled, is baked into the model HERE, before the domain-randomisation
+        # pool is copied, so every pool entry carries the identical field. See terrain/field.py
+        # for the three silent failures that makes impossible.
+        self.prepared = prepare(model_path, action_scale_mode=action_scale_mode,
+                                terrain=terrain)
         self.model = self.prepared.model
+        self._terrain = self.prepared.terrain
         self.task = task
         self.num_envs = int(num_envs)
         self.decimation = int(decimation)
         self.max_episode_steps = int(max_episode_steps)
+        self.stagger_initial_episodes = bool(stagger_initial_episodes)
         self.rng = np.random.default_rng(seed)
 
         hw = hardware.detect()
@@ -119,6 +128,14 @@ class ThreadedVecEnv:
         self.proprio_dim = (
             self.n_joint_pos + self.n_joint_vel + 3 + 3 + 3 + self.nu + self.n_feet
         )
+        # The task is configured BEFORE its observation width is read. A task whose width
+        # depends on data it loads during configuration (the get-up reference block, E43)
+        # would otherwise report its unconfigured width here and the extra channels would
+        # silently never exist, while observe_batch happily wrote into a too-narrow buffer.
+        if hasattr(task, "configure_for_model"):
+            task.configure_for_model(self.prepared.standing_height)
+        if hasattr(task, "configure_for_prepared"):
+            task.configure_for_prepared(self.prepared)
         self.obs_dim = self.proprio_dim + task.task_obs_dim
         self.n_reward_terms = max(1, len(task.reward_term_names))
 
@@ -184,6 +201,10 @@ class ThreadedVecEnv:
             lin_vel_body=np.zeros((n, 3)),
             ang_vel_body=np.zeros((n, 3)),
             heading=np.zeros(n),
+            # Stay exactly zero for the whole run when there is no terrain, which is what
+            # makes every downstream term bit-identical to a flat run.
+            ground_z=np.zeros(n),
+            key_ground_z=np.zeros((n, max(1, len(self.prepared.key_body_names)))),
             foot_force=np.zeros((n, self.n_feet)),
             torque=np.zeros((n, self.nu)),
             prev_joint_vel=np.zeros((n, self.nu)),
@@ -192,16 +213,22 @@ class ThreadedVecEnv:
             foot_first_contact=np.zeros((n, self.n_feet), dtype=bool),
             foot_lin_vel=np.zeros((n, self.n_feet, 3)),
             torso_upright=np.ones(n),
+            torso_zaxis=np.tile(np.array([0.0, 0.0, 1.0]), (n, 1)),
             head_height_ratio=np.ones(n),
             key_body_pos=np.zeros((n, max(1, len(self.prepared.key_body_names)), 3)),
             dt=self.dt,
         )
         # Let the task derive height-dependent thresholds from the actual model rather
         # than carrying numbers that silently go stale when the humanoid is swapped.
-        if hasattr(task, "configure_for_model"):
-            task.configure_for_model(self.prepared.standing_height)
+        # configure_for_model / configure_for_prepared already ran above, before obs_dim was
+        # computed; see the note there. Idempotent by construction, so they are not repeated.
         if hasattr(task, "set_joint_limits"):
             task.set_joint_limits(self._ctrl_lo.copy(), self._ctrl_hi.copy())
+        # The limits above are per-ACTUATOR; the task reads joint angles out of qpos, and on
+        # this model the two orders differ (hip_y/hip_z transposed on both legs). Hand over
+        # the map so the pairing is correct rather than assumed.
+        if hasattr(task, "set_joint_qpos_adr"):
+            task.set_joint_qpos_adr(self.prepared.actuator_qpos_adr)
         # Published so a task can build an absolute reset pose that mixes reference frames
         # with the nominal stance, without needing to know how the engine derived it.
         self.state.task_state["_nominal_qpos"] = self.prepared.default_qpos.copy()
@@ -237,7 +264,12 @@ class ThreadedVecEnv:
         # gets a horizontal velocity impulse. Applied inside the same worker phase as
         # resets, so shoving costs no extra barrier round.
         self._push_lists: list[np.ndarray] = [np.empty(0, dtype=np.int64)] * self.num_workers
-        self._push_vel = np.zeros((self.num_envs, 3))
+        # Six components, not three: linear velocity AND angular. A shove that only
+        # translates the pelvis makes the humanoid slide; a real impact off the centre of
+        # mass also spins it, which is what turns one disturbance into many different ways
+        # of ending up on the floor. The domain-randomisation push leaves the angular half
+        # at zero and behaves exactly as before.
+        self._push_vel = np.zeros((self.num_envs, 6))
         push_steps = max(1, int(self.dr_cfg.push_interval_s / self.dt))
         self._push_period = push_steps
         self._push_countdown = self.rng.integers(1, push_steps + 1, size=self.num_envs)
@@ -320,7 +352,8 @@ class ThreadedVecEnv:
         push_vel = self._push_vel
         for i in self._push_lists[widx]:
             d = datas[i]
-            d.qvel[0:3] += push_vel[i]
+            d.qvel[0:3] += push_vel[i, 0:3]
+            d.qvel[3:6] += push_vel[i, 3:6]
 
         for i in self._reset_lists[widx]:
             d = datas[i]
@@ -374,10 +407,19 @@ class ThreadedVecEnv:
         s.foot_lin_vel[idx] = sens[:, self._linvel_cols].reshape(-1, self.n_feet, 3)
         if self._torso_adr >= 0:
             s.torso_upright[idx] = sens[:, self._torso_adr + 2]
+            s.torso_zaxis[idx] = sens[:, self._torso_adr:self._torso_adr + 3]
         if self._head_adr >= 0:
             s.head_height_ratio[idx] = sens[:, self._head_adr + 2] / self._standing_head
         if self._key_cols.size:
             s.key_body_pos[idx] = sens[:, self._key_cols].reshape(-1, self.n_key_bodies, 3)
+        # Terrain height, computed once for every consumer. Measured cost at 4096 envs on the
+        # 801x801 grid: 0.346 ms per control step against a 76.6 ms batch control step, 0.45%.
+        # Left untouched (and therefore identically zero) when there is no terrain.
+        if self._terrain is not None:
+            s.ground_z[idx] = self._terrain.height_at(s.qpos[idx, 0], s.qpos[idx, 1])
+            if self._key_cols.size:
+                kp = s.key_body_pos[idx]
+                s.key_ground_z[idx] = self._terrain.height_at(kp[..., 0], kp[..., 1])
 
     def _update_foot_air_time(self) -> None:
         """Track how long each foot has been airborne, and flag touchdowns.
@@ -421,6 +463,41 @@ class ThreadedVecEnv:
             self._obs[idx, self.proprio_dim :] = self._task_obs[idx].astype(np.float32)
         _ = n1, n2
 
+    def _task_pushes(self) -> np.ndarray:
+        """Shoves the TASK asked for, independent of domain randomisation.
+
+        The get-up task uses this to disturb a hold in progress, which is what turns "held the
+        pose for 2 s" into "held it against something". Kept separate from the randomisation
+        push so it fires even with domain_rand disabled, which is exactly the configuration an
+        evaluation runs in: an anti-cheat measure that switches itself off during evaluation
+        would be measuring the wrong policy.
+        """
+        request = getattr(self.task, "push_request", None)
+        if request is None:
+            return np.empty(0, dtype=np.int64)
+        # Pass THIS env's state. One Task instance is shared by the training, evaluation and
+        # render environments, which have different widths (4096 / 64 / 1), so anything the
+        # task answers per-environment has to be asked about a specific state. A task that
+        # kept the answer on itself would size the array to whichever env initialised last.
+        due = request(self.state)
+        if due is None or not np.any(due):
+            return np.empty(0, dtype=np.int64)
+        idx = np.flatnonzero(due).astype(np.int64)
+        # A task may hand over the full impulse itself (linear + angular). If it only says
+        # WHICH environments, fall back to a planar shove of the configured speed.
+        supplied = getattr(self.task, "push_impulse", None)
+        if supplied is not None:
+            imp = supplied(self.state)
+            if imp is not None:
+                self._push_vel[idx] = imp[idx]
+                return idx
+        speed = float(getattr(self.task.cfg, "hold_push_vel", 0.6))
+        angle = self.rng.uniform(-np.pi, np.pi, idx.size)
+        self._push_vel[idx] = 0.0
+        self._push_vel[idx, 0] = speed * np.cos(angle)
+        self._push_vel[idx, 1] = speed * np.sin(angle)
+        return idx
+
     def _select_pushes(self) -> np.ndarray:
         """Tick every environment's push countdown and return those due for a shove."""
         cfg = self.dr_cfg
@@ -432,9 +509,9 @@ class ThreadedVecEnv:
         if idx.size:
             angle = self.rng.uniform(0.0, 2.0 * np.pi, size=idx.size)
             magnitude = self.rng.uniform(0.0, cfg.push_vel_xy, size=idx.size)
+            self._push_vel[idx] = 0.0
             self._push_vel[idx, 0] = magnitude * np.cos(angle)
             self._push_vel[idx, 1] = magnitude * np.sin(angle)
-            self._push_vel[idx, 2] = 0.0
             # Randomise the next interval so pushes never fall into lockstep across
             # environments, which would put a periodic spike in the reward signal.
             self._push_countdown[idx] = self.rng.integers(
@@ -504,6 +581,28 @@ class ThreadedVecEnv:
                 self._reset_qpos_noise, self._reset_qvel_noise = noise
                 self._has_reset_noise = True
 
+        # Seed the servo targets from the pose the humanoid is actually being reset INTO,
+        # rather than from the standing pose.
+        #
+        # Both `s.ctrl` and `_ctrl_filtered` were set to `_default_joint_pos` above, which is
+        # correct while every reset is a stand: the target equals the pose and the first step
+        # demands nothing. It becomes badly wrong the moment a task resets into a pose on the
+        # floor, because step 1 then commands a STANDING configuration to a body lying down.
+        # Measured over 24 settled fallen poses, the first control step demands a mean
+        # |torque| of 92.8 N.m peaking at 1002 N.m, with 6.5 of 28 joints pinned at their
+        # ceiling. Seeding from the reset pose's own angles gives 1.47 N.m mean and 11.1 N.m
+        # peak: a 63x reduction. Without this the opening 100 ms of every fallen episode is a
+        # full-torque convulsion the policy never chose, and any analysis of how a get-up
+        # begins would be studying the engine rather than the policy.
+        #
+        # Indexed through actuator_qpos_adr, never qpos[7:]: see E25, hip_y and hip_z are
+        # transposed on both legs and a naive slice silently swaps four servo targets.
+        if self._has_reset_pose and done_idx.size:
+            rows = self._reset_row[done_idx]
+            joints = self._reset_qpos_abs[rows][:, self.prepared.actuator_qpos_adr]
+            s.ctrl[done_idx] = joints
+            self._ctrl_filtered[done_idx] = joints
+
         self._run_phase(_PHASE_RESET)
 
         self._compute_derived(done_idx)
@@ -521,6 +620,20 @@ class ThreadedVecEnv:
         self.state.ctrl[:] = 0.0
         self._ctrl_filtered[:] = self._default_joint_pos
         self._do_resets(all_idx)
+        # E34: de-synchronise episode boundaries. With no early termination every env
+        # truncates at max_episode_steps on the SAME step, so anything tied to resets (the
+        # get-up task's standing starts) arrives in a burst once per ~104 iterations and the
+        # policy trains on pure-floor batches in between. Measured on the live run this was
+        # built to fix: reward/stand was exactly 0.0 in 332 of 349 iterations, and each
+        # burst spiked KL to 0.09-0.18 against a 0.01 target, slashing the learning rate.
+        # A random initial phase makes the first episode of each env shorter by a random
+        # amount; every later episode keeps that offset forever, so resets trickle at a
+        # steady ~num_envs/max_episode_steps per step instead of arriving as a wall.
+        # TRAINING ENVS ONLY (the flag stays False elsewhere): a staggered evaluation env
+        # would truncate its episodes early and bias every episode-return metric.
+        if self.stagger_initial_episodes:
+            self.state.episode_step[:] = self.rng.integers(
+                0, self.max_episode_steps, self.num_envs)
         return self._obs.copy()
 
     def step(self, actions: np.ndarray) -> StepResult:
@@ -592,7 +705,8 @@ class ThreadedVecEnv:
         self._ep_length_out[done] = s.episode_step[done]
 
         done_idx = np.flatnonzero(done)
-        self._do_resets(done_idx, self._select_pushes())
+        self._do_resets(done_idx, np.union1d(self._select_pushes(), self._task_pushes())
+                        .astype(np.int64))
         self._ep_return[done_idx] = 0.0
 
         return StepResult(

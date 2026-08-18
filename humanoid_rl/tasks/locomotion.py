@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import mujoco
 import numpy as np
 
 from humanoid_rl.tasks.base import BatchState, Task
@@ -427,10 +428,31 @@ class LocomotionTask(Task):
         "dof_pos_limits",
     )
 
-    def __init__(self, config: LocomotionConfig | None = None) -> None:
+    def __init__(self, config: LocomotionConfig | None = None,
+                 seed: int = 0) -> None:
         self.cfg = config or LocomotionConfig()
+        # The task's OWN generator, and it is never rebound afterwards. One task object is
+        # shared by the training env, the evaluation env and the render env, and
+        # `init_state` used to assign `self._rng = rng`, so it ended up pointing at
+        # whichever env was constructed last. After the first video render, training's
+        # mid-episode command redraws and the difficulty sampler were drawing from the
+        # render env's stream, and the eval env's draws at eval N depended on how much
+        # training had happened to redraw in between. That makes two evaluations of two
+        # checkpoints incomparable, which is the assumption the entire best-checkpoint
+        # selection rests on.
+        self._rng = np.random.default_rng(seed)
+        #: Terrain reader, or None on flat ground. Set by `configure_for_prepared`.
+        self._terrain = None
+        self._foot_probe_offsets = np.zeros((0, 2))
         self._limit_lo = np.full(28, -1e9)
         self._limit_hi = np.full(28, 1e9)
+        #: qpos index per ACTUATOR. Set from the prepared model; the fallback assumes the
+        #: identity mapping, which is wrong on this humanoid and is why it is overwritten.
+        self._joint_qpos_adr = np.arange(7, 7 + 28)
+
+    def set_joint_qpos_adr(self, adr: np.ndarray) -> None:
+        """Where each actuator's joint angle lives in qpos. See PreparedModel."""
+        self._joint_qpos_adr = np.asarray(adr, dtype=int)
 
     def set_joint_limits(self, lo: np.ndarray, hi: np.ndarray) -> None:
         """Joint range for the soft-limit penalty, from the prepared model."""
@@ -449,6 +471,24 @@ class LocomotionTask(Task):
         """
         self.cfg.target_height = standing_height
         self.cfg.terminate_height = 0.62 * standing_height
+
+    def configure_for_prepared(self, prepared) -> None:
+        """Take the terrain reader and precompute the footprint probe offsets.
+
+        The engine already calls this hook when a task defines it (vec_env.py:137), so
+        terrain reaches the task without touching the engine's constructor.
+
+        The probes are body-frame (dx, dy) points covering BOTH feet at the nominal pose:
+        each foot's centre plus the four corners of its box, which is what the spawn lift
+        needs. A single probe under the root understates the surface by enough to drive tens
+        of body weights into the first frame -- see `reset_noise`.
+        """
+        self._terrain = getattr(prepared, "terrain", None)
+        if self._terrain is None:
+            return
+        from humanoid_rl.terrain import foot_probe_offsets
+
+        self._foot_probe_offsets = foot_probe_offsets(prepared)
 
     @property
     def task_obs_dim(self) -> int:
@@ -508,8 +548,8 @@ class LocomotionTask(Task):
         state.task_state["penalty_scale"] = float(self.cfg.penalty_scale_init)
         state.task_state["episode_len_ema"] = 200.0
         # The task owns a generator so mid-episode redraws do not need one threaded in
-        # through `on_batch_end`, which the engine calls without one.
-        self._rng = rng
+        # through `on_batch_end`, which the engine calls without one. It is created once in
+        # __init__ and deliberately NOT rebound here -- see the note there.
         state.task_state["lead"] = np.zeros(state.num_envs, dtype=np.int64)
         state.task_state["lead_swaps"] = np.zeros(state.num_envs)
         state.task_state["gait_steps"] = np.zeros(state.num_envs)
@@ -552,6 +592,30 @@ class LocomotionTask(Task):
         # or spawn it already rotated, neither of which is useful randomisation.
         qpos_noise[:, 7:] = rng.normal(0.0, cfg.joint_pos_noise, size=(k, nq - 7))
         qvel_noise[:, 6:] = rng.normal(0.0, cfg.joint_vel_noise, size=(k, nv - 6))
+
+        # On terrain, scatter the spawn across the field and lift it onto the surface.
+        #
+        # The scatter IS the terrain randomisation: one static field sampled at thousands of
+        # places is what gives 4096 envs varied ground, and it is why no per-env heightfield
+        # and no terrain curriculum is needed.
+        #
+        # The lift is the load-bearing part, and it is not "add the height under the root".
+        # Measured on the chosen field: spawning at the unmodified nominal root height drives
+        # 30,295 N under one foot on the first frame -- 61.7x body weight against a 9.82 N
+        # contact threshold, so `foot_contact` is trivially true and `foot_force`, which the
+        # tasks read in body-weight units, is off by a factor of sixty in the first
+        # observation of every episode. Offsetting by the height under the ROOT still leaves
+        # 32.2 BW, because a 17.7 x 9.0 cm box foot straddles cells the root does not.
+        # Taking the maximum over both footprints gives a median of 0.0 N and a peak of
+        # 1.80 BW. That is the difference between training on terrain and training on an
+        # instrumentation artefact.
+        if self._terrain is not None:
+            s = self._terrain.spawn_half_extent
+            x = rng.uniform(-s, s, k)
+            y = rng.uniform(-s, s, k)
+            qpos_noise[:, 0] = x
+            qpos_noise[:, 1] = y
+            qpos_noise[:, 2] = self._terrain.probe_max(x, y, self._foot_probe_offsets)
         return qpos_noise, qvel_noise
 
     def _draw_command(
@@ -680,8 +744,13 @@ class LocomotionTask(Task):
 
         # Target height follows the commanded fraction, which is what makes crouching a
         # point in the command space rather than a future retrain.
+        # Height ABOVE THE GROUND UNDER THE ROOT, not world z. `ground_z` is identically 0.0
+        # on a plane, so this line is bit-identical to the flat version there; on terrain it
+        # is the difference between measuring posture and measuring the hill. Standing on a
+        # 2.6 cm rise otherwise reads as 2.6 cm too tall and is penalised for it.
         height_err = (
-            state.root_height - cfg.target_height * state.task_state["body_height"]
+            (state.root_height - state.ground_z)
+            - cfg.target_height * state.task_state["body_height"]
         ) ** 2
 
         torque_cost = np.sum(np.square(state.torque), axis=1)
@@ -776,7 +845,10 @@ class LocomotionTask(Task):
         terms[:, 17] = cfg.w_orientation * np.sum(np.square(state.gravity_body[:, :2]), axis=1)
         # G1's swing height: feet should swing at a consistent clearance, penalised only
         # while the foot is airborne.
-        foot_z = state.key_body_pos[:, :2, 2]
+        # Clearance above the ground UNDER EACH FOOT. A swing foot crossing a rise is not
+        # lifting higher, it has less room, and pricing that as a fault would teach the
+        # policy to drag its feet uphill. Zero on flat, so this is exact there.
+        foot_z = state.key_body_pos[:, :2, 2] - state.key_ground_z[:, :2]
         swinging = ~state.foot_contact[:, :2]
         terms[:, 18] = cfg.w_swing_height * np.sum(
             np.square(foot_z - cfg.swing_height_target) * swinging, axis=1
@@ -789,9 +861,17 @@ class LocomotionTask(Task):
             + np.clip(separation - cfg.feet_distance_max, 0.0, 0.3)
         )
         # G1's soft joint-limit penalty at 90% of range.
+        #
+        # Indexed through actuator_qpos_adr, NOT qpos[7:7+nu]. The limits come from
+        # actuator_ctrlrange in ACTUATOR order, and on this model actuator order is not qpos
+        # order: hip_y and hip_z are transposed on both legs, so 4 of 28 were mismatched.
+        # The effect was silent and pointed the wrong way for us: hip_y's true +-2.44 rad
+        # range was scored against hip_z's +-1.05 rad one, so deep hip flexion, which is
+        # exactly what a long stride needs, read as a limit violation at weight -5.0.
+        angles = state.qpos[:, self._joint_qpos_adr]
         overflow = (
-            np.clip(self._limit_lo * 0.9 - state.qpos[:, 7:7 + joint_vel.shape[1]], 0, None)
-            + np.clip(state.qpos[:, 7:7 + joint_vel.shape[1]] - self._limit_hi * 0.9, 0, None)
+            np.clip(self._limit_lo * 0.9 - angles, 0, None)
+            + np.clip(angles - self._limit_hi * 0.9, 0, None)
         )
         terms[:, 20] = cfg.w_dof_pos_limits * np.sum(overflow, axis=1)
         # Only-positive total, legged_gym's oldest trick and the field's universal answer
@@ -1100,7 +1180,12 @@ class LocomotionTask(Task):
 
     def terminated_batch(self, state: BatchState) -> np.ndarray:
         cfg = self.cfg
-        fallen = state.root_height < cfg.terminate_height
+        # The fall test, against the ground under the root rather than against z = 0. This is
+        # the most consequential of the terrain fixes: on a field with 5.25 cm of relief the
+        # world-z version terminates a perfectly upright humanoid standing in a dip, and
+        # forgives one that has collapsed on a rise. Both errors are silent, both look like
+        # policy behaviour in the fall rate, and fall rate is the headline metric.
+        fallen = (state.root_height - state.ground_z) < cfg.terminate_height
         # gravity_body z near -1 is upright; rising above -max_tilt means it has toppled.
         toppled = state.gravity_body[:, 2] > -cfg.max_tilt
         # Upper-body checks. A humanoid can keep its pelvis perfectly level and upright

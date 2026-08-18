@@ -27,6 +27,7 @@ for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECL
 
 import argparse
 import signal
+import math
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -42,6 +43,7 @@ from humanoid_rl.config import Config, resolve_device
 from humanoid_rl.envs.vec_env import ThreadedVecEnv
 from humanoid_rl.evaluate import evaluate
 from humanoid_rl.logging_utils.metrics import EpisodeStats, RunLogger
+from humanoid_rl.oracle import invariants
 from humanoid_rl.render import SHORT_SCHEDULE, build_render_env, render_episode
 from humanoid_rl.tasks.locomotion import LocomotionTask
 from humanoid_rl.tasks.tracking import TrackingTask
@@ -55,6 +57,7 @@ class Trainer:
 
     def __init__(self, config: Config, resume_dir: str | None = None) -> None:
         self.cfg = config
+        self._gate_on_oracle(config)
         self.hw = hardware.detect()
 
         # Reproducibility. Every stochastic component is seeded from the one config value.
@@ -76,8 +79,11 @@ class Trainer:
             decimation=config.env.decimation,
             max_episode_steps=config.env.max_episode_steps,
             action_filter_hz=config.env.action_filter_hz,
+            action_scale_mode=config.env.action_scale_mode,
             seed=seed,
             domain_rand=config.domain_rand,
+            stagger_initial_episodes=config.env.stagger_initial_episodes,
+            terrain=config.terrain,
         )
 
         self.policy = ActorCritic(
@@ -89,6 +95,15 @@ class Trainer:
             init_noise_std=config.network.init_noise_std,
             log_std_max=config.ppo.log_std_max,
         ).to(self.device)
+
+        # Set here, right after the policy exists and BEFORE any warm start, so that
+        # init_policy_from's clamp_log_std enforces the floor on the loaded weights too.
+        if config.ppo.explore_floor_dims:
+            self.policy.set_explore_floor(
+                config.ppo.explore_floor_dims, config.ppo.explore_floor)
+            print(f"exploration floor: log_std >= {config.ppo.explore_floor:+.2f} "
+                  f"(std {math.exp(config.ppo.explore_floor):.3f}) on action dims "
+                  f"{list(config.ppo.explore_floor_dims)}")
 
         # Adversarial motion prior. Owns the discriminator, its optimiser, the policy
         # replay buffer and the reference sampler. Only built for the amp task.
@@ -141,6 +156,10 @@ class Trainer:
         # worker pool, and a short debug run may never evaluate at all. Its threads park on
         # a barrier when idle, so an unused pool costs no CPU.
         self.eval_env: ThreadedVecEnv | None = None
+        #: Second eval env on a plane, built only when terrain is enabled. See
+        #: `_get_flat_eval_env`: it is what keeps a terrain run comparable to every flat
+        #: number on the project scorecard.
+        self.flat_eval_env: ThreadedVecEnv | None = None
         self.eval_count = 0
         # Env-step mark for the next stick-figure capture. Set from the current step count
         # so a resumed run does not immediately fire one.
@@ -181,7 +200,11 @@ class Trainer:
         """Construct the objective named by `run.task`."""
         kind = config.run.task
         if kind == "locomotion":
-            return LocomotionTask(config.task)
+            return LocomotionTask(config.task, seed=config.run.seed)
+        if kind == "getup":
+            from humanoid_rl.tasks.getup import GetUpTask
+
+            return GetUpTask(config.getup)
         if kind == "amp":
             from humanoid_rl.envs.model_prep import prepare
             from humanoid_rl.motion.library import MotionLibrary
@@ -240,6 +263,19 @@ class Trainer:
             t0 = time.perf_counter()
             res = self.env.step(action_np)
             t_env += time.perf_counter() - t0
+
+            # One non-finite reward out of 4096 envs destroys the whole update, not just its
+            # own env: GAE propagates it down the rollout, and `advantages.mean()/std()` in
+            # ppo.py then turns the entire batch to NaN. Measured on RolloutBuffer: 1 NaN
+            # reward in 1 of 8 envs on 1 of 4 steps -> 3/32 advantages NaN -> 32/32 after
+            # normalisation. The policy is destroyed permanently and silently, because
+            # `is_best = NaN > best_return` is False forever after, so no new best.pt is
+            # written and the run keeps burning wall-clock looking healthy.
+            #
+            # vec_env computes the reward BEFORE its own NaN guard (vec_env.py:668 against
+            # the isfinite check in terminated_batch at :677), so a non-finite value is
+            # already inside StepResult by the time it arrives here. Contain it at the door.
+            np.nan_to_num(res.reward, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
             # Adversarial motion prior: blend the discriminator's verdict into the reward
             # before it reaches the buffer. Done here rather than inside the task because
@@ -327,6 +363,7 @@ class Trainer:
                 decimation=cfg.env.decimation,
                 max_episode_steps=cfg.env.max_episode_steps,
                 action_filter_hz=cfg.env.action_filter_hz,
+            action_scale_mode=cfg.env.action_scale_mode,
                 # Fixed offset seed: evaluation is reproducible and independent of how far
                 # the training environment's RNG has advanced.
                 seed=cfg.run.seed + 10_000,
@@ -334,14 +371,93 @@ class Trainer:
                 # would mix "did the policy improve" with "was this draw of physics easy",
                 # making scores incomparable across checkpoints.
                 domain_rand=replace(cfg.domain_rand, enabled=False),
+                # Evaluate on the SAME ground the policy trains on. Without this the eval
+                # env silently gets a plane, because `build_model_pool` returns a pool of one
+                # whenever randomisation is off -- training on rough and scoring on flat, and
+                # reporting the flat number as the result. That is E16's shape exactly: a
+                # measurement configured differently from the thing it measures.
+                terrain=cfg.terrain,
             )
         return self.eval_env
+
+    def _get_flat_eval_env(self) -> ThreadedVecEnv:
+        """A second evaluation env on a PLANE, so terrain runs stay comparable to flat ones.
+
+        Every number on the project scorecard was measured on flat ground. Scoring a terrain
+        run only on terrain would start a second, incompatible series and quietly retire the
+        first -- and "never compare a constant, compare the quantity it stands for" (E31b)
+        applies to a fall rate as much as to a discount factor. Reported under `eval_flat/`
+        against the terrain eval's `eval/`.
+
+        Costs 64 more MjData and one extra eval pass per interval, against 100 iterations of
+        ~4.6 s between evals.
+        """
+        if self.flat_eval_env is None:
+            cfg = self.cfg
+            self.flat_eval_env = ThreadedVecEnv(
+                REPO_ROOT / cfg.env.model_path,
+                self.task,
+                num_envs=cfg.eval.num_envs,
+                num_workers=cfg.env.num_workers,
+                decimation=cfg.env.decimation,
+                max_episode_steps=cfg.env.max_episode_steps,
+                action_filter_hz=cfg.env.action_filter_hz,
+                action_scale_mode=cfg.env.action_scale_mode,
+                seed=cfg.run.seed + 30_000,
+                domain_rand=replace(cfg.domain_rand, enabled=False),
+                terrain=None,
+            )
+            # Guard, not a comment: the two eval envs must differ in the ground and in
+            # NOTHING else, or the comparison they exist for is meaningless.
+            import mujoco
+            import numpy as np
+
+            rough = self._get_eval_env()
+            if not np.allclose(self.flat_eval_env.prepared.action_scale,
+                               rough.prepared.action_scale):
+                raise RuntimeError("flat and rough eval envs disagree on action_scale")
+            flat_type = int(self.flat_eval_env.prepared.model.geom_type[
+                self.flat_eval_env.prepared.floor_geom_id])
+            if flat_type != int(mujoco.mjtGeom.mjGEOM_PLANE):
+                raise RuntimeError("the flat eval env's floor is not a plane")
+        return self.flat_eval_env
 
     def _get_render_env(self) -> ThreadedVecEnv:
         if self.render_env is None:
             self.render_env = build_render_env(
-                REPO_ROOT / self.cfg.env.model_path, self.task, seed=self.cfg.run.seed + 20_000
+                REPO_ROOT / self.cfg.env.model_path, self.task,
+                seed=self.cfg.run.seed + 20_000,
+                action_scale_mode=self.cfg.env.action_scale_mode,
+                terrain=self.cfg.terrain,
             )
+            # Guard, not a comment. Training, evaluation and rendering must share one action
+            # mapping; if they drift, every video and every eval silently describes a robot
+            # that was never trained. This exact class of fault has now appeared three times
+            # in this project (episode length, actuator ordering, the overlay's command).
+            import numpy as np
+
+            if not np.allclose(self.render_env.prepared.action_scale,
+                               self.env.prepared.action_scale):
+                raise RuntimeError(
+                    "render env action_scale differs from the training env: "
+                    f"{self.render_env.prepared.action_scale[:3]} vs "
+                    f"{self.env.prepared.action_scale[:3]}")
+            # The ground is part of "the same robot", and it was the fourth instance of this
+            # class: the first terrain video showed a flat checkerboard while every training
+            # env ran on a 5.25 cm field. A video of the wrong world is worse than no video,
+            # because this project's own rule is that three failures were caught only by
+            # watching one.
+            import mujoco
+
+            r_floor = int(self.render_env.prepared.model.geom_type[
+                self.render_env.prepared.floor_geom_id])
+            t_floor = int(self.env.prepared.model.geom_type[
+                self.env.prepared.floor_geom_id])
+            if r_floor != t_floor:
+                raise RuntimeError(
+                    f"render env ground is {mujoco.mjtGeom(r_floor).name} but training runs "
+                    f"on {mujoco.mjtGeom(t_floor).name}. Every video would show a world the "
+                    "policy was never trained in.")
         return self.render_env
 
     def capture_skeleton(self) -> Path | None:
@@ -356,7 +472,14 @@ class Trainer:
             from humanoid_rl.viz import skeleton
 
             env = self._get_render_env()
-            capture = skeleton.capture(env, self.policy, self.device)
+            # A get-up starts on the floor, so the walking view set (six angles around an
+            # upright body) mostly shows a silhouette. Use the sagittal-biased set and a
+            # longer window: the rise takes several seconds, a stride takes one.
+            extra = {}
+            if self.cfg.run.task == "getup":
+                extra = {"views": skeleton.GETUP_VIEWS, "seconds": 6.0, "settle": 0.0,
+                         "max_frames": 90}
+            capture = skeleton.capture(env, self.policy, self.device, **extra)
             path = skeleton.write(
                 capture,
                 self.logger.run_dir / "skeletons" / f"iter_{self.iteration:08d}.json",
@@ -383,6 +506,14 @@ class Trainer:
         try:
             env = self._get_render_env()
             out = self.logger.video_dir / f"iter_{self.iteration:08d}_{tag}.mp4"
+            # The walking camera sits high and follows the heading, which for a body on the
+            # floor frames mostly empty ground. Drop it and pull back for the get-up task.
+            camera = None
+            if self.cfg.run.task == "getup":
+                from humanoid_rl.render import CameraConfig
+
+                camera = CameraConfig(distance=3.0, elevation=-8.0, azimuth=100.0,
+                                      height_offset=0.55)
             t0 = time.perf_counter()
             result = render_episode(
                 env,
@@ -390,6 +521,7 @@ class Trainer:
                 self.device,
                 out,
                 schedule=SHORT_SCHEDULE,
+                camera=camera,
                 width=cfg.video_width,
                 height=cfg.video_height,
                 fps=cfg.video_fps,
@@ -436,6 +568,21 @@ class Trainer:
         metrics = result.to_flat_dict()
         metrics["eval/seconds"] = time.perf_counter() - t0
 
+        # On terrain, score the SAME policy on a plane as well, under `eval_flat/`. Without
+        # it a terrain run's fall rate is not comparable to a single number on the project's
+        # scorecard, all of which were measured on flat ground, and the temptation would be
+        # to compare them anyway.
+        if cfg.terrain.enabled:
+            flat = evaluate(
+                self._get_flat_eval_env(),
+                self.policy,
+                self.device,
+                num_episodes=cfg.eval.num_episodes,
+                max_steps=cfg.env.max_episode_steps * 2,
+            )
+            for k, v in flat.to_flat_dict().items():
+                metrics["eval_flat/" + k.removeprefix("eval/")] = v
+
         self.logger.log_event(
             "evaluation", iteration=self.iteration, env_steps=self.env_steps, **metrics
         )
@@ -444,6 +591,13 @@ class Trainer:
             f"len {result.episode_length:>6.1f}  speed {result.mean_speed:.2f} m/s  "
             f"falls {result.fall_rate * 100:>5.1f}%  ({result.num_episodes} episodes)"
         )
+        if "eval_flat/fall_rate" in metrics:
+            print(
+                f"  flat  falls {metrics['eval_flat/fall_rate'] * 100:>5.1f}%  "
+                f"speed {metrics['eval_flat/mean_speed']:.2f} m/s  "
+                f"upright {metrics['eval_flat/torso_upright']:.3f}   "
+                f"<- same policy, plane, comparable to every historical number"
+            )
         return metrics
 
     # ------------------------------------------------------------------ main loop
@@ -567,11 +721,52 @@ class Trainer:
             f"eta {eta_h:>5.1f}h"
         )
 
+    # ------------------------------------------------------------------ launch gate
+
+    @staticmethod
+    def _gate_on_oracle(config: Config) -> None:
+        """Refuse to start on a config the project's own invariants call contradictory.
+
+        `scripts/oracle.py` has existed since E11 and exits 1 on a contradiction so that it
+        can gate a launch. Nothing ever called it from the training entry point, so it only
+        gated the launches someone remembered to run it before. It would have caught both
+        faults `configs/default.yaml` carried for its whole life -- gamma 0.99 as a 0.80 s
+        horizon at 125 Hz (E31) and log_std_max 5.0 as no ceiling at all (E30) -- and the
+        second of those measurably cost the best locomotion run its posture.
+
+        Set HUMANOID_SKIP_ORACLE=1 to run a deliberately contradictory config; it prints
+        loudly, because a silent override is the same defect one level up.
+        """
+        if os.environ.get("HUMANOID_SKIP_ORACLE") == "1":
+            print("oracle: SKIPPED by HUMANOID_SKIP_ORACLE=1")
+            return
+        blocking = [
+            f for f in invariants.run_all(config)
+            if f.severity in (invariants.Severity.CONTRADICTION, invariants.Severity.UNREACHABLE)
+        ]
+        if not blocking:
+            return
+        print("\noracle: refusing to launch\n")
+        for f in blocking:
+            print(f"  {f.line()}")
+            if f.remedy:
+                print(f"     fix: {f.remedy}")
+        raise SystemExit(
+            f"\n{len(blocking)} blocking finding(s). Training cannot fix a setup problem, "
+            "and every hour spent running is spent on the wrong objective."
+        )
+
     # ------------------------------------------------------------------ checkpoints
 
     def save_checkpoint(self, best: bool = False) -> None:
         name = "best.pt" if best else f"iter_{self.iteration:08d}.pt"
         path = self.logger.checkpoint_dir / name
+        # Write-then-rename, because `torch.save` writes in place. best.pt IS the
+        # deliverable and is rewritten on every new record, and --resume loads
+        # sorted(glob("iter_*.pt"))[-1], which is precisely the file an interrupt would
+        # truncate. os.replace is atomic within a filesystem, so a kill at any instant
+        # leaves either the old complete file or the new complete file, never a stump.
+        tmp = path.with_suffix(".pt.tmp")
         torch.save(
             {
                 "iteration": self.iteration,
@@ -583,8 +778,9 @@ class Trainer:
                 "ppo": self.ppo.state_dict(),
                 "config": self.cfg.to_dict(),
             },
-            path,
+            tmp,
         )
+        os.replace(tmp, path)
         self.logger.log_event(
             "checkpoint",
             path=str(path.relative_to(self.logger.run_dir)),

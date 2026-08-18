@@ -123,6 +123,12 @@ class PPOConfig:
     log_std_max: float = 0.0
 
     # --- adaptive learning rate ---
+    #: Per-dimension exploration floor: which action indices, and the minimum log_std.
+    #: A scalar floor cannot express "one dimension collapsed while 27 are healthy", which
+    #: is what was measured on the best policy (abdomen_y std 0.196 against a 28-dim mean of
+    #: 0.889). Empty tuple disables it entirely.
+    explore_floor_dims: tuple[int, ...] = ()
+    explore_floor: float = -5.0
     adaptive_lr: bool = True
     desired_kl: float = 0.01
     lr_min: float = 1.0e-5
@@ -384,6 +390,12 @@ class PPO:
                     )
 
                 self.optimizer.zero_grad(set_to_none=True)
+                # Second line of defence behind the reward containment in train.py. A single
+                # non-finite loss backpropagates NaN into every parameter, and Adam then
+                # keeps them NaN forever regardless of what arrives afterwards. Skipping the
+                # minibatch costs one gradient step; taking it costs the run.
+                if not torch.isfinite(loss):
+                    continue
                 loss.backward()
                 grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.max_grad_norm)
                 self.optimizer.step()

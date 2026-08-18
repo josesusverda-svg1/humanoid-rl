@@ -1,0 +1,212 @@
+run:
+  name: getup
+  seed: 0
+  device: auto
+  total_env_steps: 900000000
+  output_dir: runs
+  task: getup
+env:
+  model_path: humanoid_rl/models/humanoid_scene.xml
+  num_envs: 4096
+  num_workers: null
+  decimation: 4
+  max_episode_steps: 2500
+  # E34: no early termination means every env otherwise truncates on the SAME step, and the
+  # 30% standing starts arrive as a wall once per ~104 iterations instead of a steady
+  # trickle. Measured: reward/stand was exactly 0.0 in 332 of 349 iterations of the first
+  # E34 attempt, with KL spikes to 0.18 at each wave.
+  stagger_initial_episodes: true
+  action_scale_mode: full_range
+network:
+  actor_hidden:
+  - 512
+  - 512
+  critic_hidden:
+  - 512
+  - 512
+  activation: elu
+  init_noise_std: 0.8
+ppo:
+  horizon: 24
+  # 0.9985, NOT the 0.99 every reference repo uses, because gamma is a horizon in seconds and
+  # not a number. One control step here is 8 ms (500 Hz physics, decimation 4), so 0.99 buys
+  # 1/(1-g) = 100 steps = 0.80 s. legged_gym, HumanUP and unitree_rl_gym all run 0.99 at
+  # 50 Hz, where it buys 2.0 s. E31: this task asks him to stand and HOLD for 2.0 s, which at
+  # 0.99 is discounted to 0.081, and a 4 s rise followed by that hold to 0.00053. The success
+  # criterion was outside the agent's horizon for every get-up run in the project, so no
+  # reward change could ever have reached it. He learned to cycle up and down instead, because
+  # the pump paid inside 0.8 s.
+  #
+  # 0.9985 is a 5.33 s horizon against a 4.0 s requirement (a 2 s hold after a rise measured
+  # at 2-4 s from supine). 0.998 was tried first and lands on EXACTLY 4.00 s, which failed the
+  # Oracle by 4e-15 s of floating point. Rather than loosen the check to fit the number, take
+  # the margin: a threshold met to fifteen decimal places is not met in any useful sense.
+  #
+  # Above the 0.996-0.998 band that rescaling the references to 125 Hz (Tallec et al.,
+  # ICML 2019) suggests, and deliberately so: that band is derived from WALKING tasks, which
+  # are cyclic and genuinely need only a gait cycle. This task states a 4 s requirement
+  # outright. Not higher than 5.33 s either, because nothing in the task asks for more.
+  #
+  # Verified safe before landing: every getup episode ends by TRUNCATION at max_episode_steps
+  # (GetUpTask.terminated_batch is a NaN guard only), and ppo.py bootstraps V(final_obs) on
+  # truncation. Treating a time limit as terminal would have biased the return in proportion
+  # to the horizon and got 3.4x worse here. It does not. Measured critic cost of the wider
+  # value target: 21 iterations to calibrate instead of 14, about 0.2% of the budget.
+  gamma: 0.9985
+  gae_lambda: 0.95
+  learning_rate: 0.001
+  num_epochs: 5
+  num_minibatches: 4
+  clip_ratio: 0.2
+  value_loss_coef: 1.0
+  entropy_coef: 0.01
+  max_grad_norm: 1.0
+  clip_value_loss: true
+  bounds_loss_coef: 1.0
+  log_std_max: 0.0
+  # E38: guard for the warm start; the measured init_from failure is approx_kl 24.45 at
+  # iteration 1 (curriculum-20260814). 30 updates of critic-only learning first.
+  critic_warmup_updates: 30
+  adaptive_lr: true
+  desired_kl: 0.01
+  lr_min: 1.0e-05
+  lr_max: 0.01
+  normalize_advantage: true
+  obs_clip: 10.0
+task:
+  lin_vel_x_range:
+  - -0.8
+  - 1.5
+  lin_vel_y_range:
+  - -0.6
+  - 0.6
+  ang_vel_yaw_range:
+  - -1.0
+  - 1.0
+  forward_bias_prob: 0.4
+  forward_cone_deg: 30.0
+  zero_command_prob: 0.05
+  w_lin_vel: 1.0
+  w_ang_vel: 0.5
+  w_upright: 0.3
+  w_height: 0.3
+  w_torso_upright: 0.6
+  w_head_height: 0.3
+  w_alive: 0.5
+  w_torque: -1.0e-05
+  w_action_rate: -0.01
+  sigma_lin_vel: 0.25
+  sigma_ang_vel: 0.25
+  sigma_height: 0.02
+  target_height: 0.877
+  terminate_height: 0.55
+  max_tilt: 0.7
+  terminate_torso_upright: 0.5
+  terminate_head_ratio: 0.65
+  w_feet_air_time: 1.0
+  w_flight: -0.3
+  w_feet_slip: -0.2
+  w_gait_phase: 1.0
+  free_gait_prob: 0.0
+  gait_frequency: 0.9
+  stance_fraction: 0.6
+  w_vertical_vel: -0.8
+  w_ang_vel_xy: -0.05
+  w_lateral_vel: 0.4
+  sigma_lateral_vel: 0.05
+  w_heading: 0.5
+  sigma_heading: 0.15
+  air_time_target: 0.44
+  joint_pos_noise: 0.02
+  joint_vel_noise: 0.02
+domain_rand:
+  enabled: true
+  model_pool_size: 64
+  friction_range:
+  - 0.5
+  - 1.25
+  mass_scale_range:
+  - 0.85
+  - 1.15
+  com_offset: 0.015
+  kp_scale_range:
+  - 0.85
+  - 1.15
+  kd_scale_range:
+  - 0.85
+  - 1.15
+  armature_scale_range:
+  - 1.0
+  - 1.1
+  obs_noise_joint_pos: 0.01
+  obs_noise_joint_vel: 0.15
+  obs_noise_gravity: 0.02
+  obs_noise_lin_vel: 0.05
+  obs_noise_ang_vel: 0.1
+  push_interval_s: 5.0
+  # E33, the second arm of the same defect. This is added straight to qvel by the ENGINE, so
+  # the task cannot see it and no grace window can cover it. At 0.7 it voided conjunct 13
+  # (cap 0.4) mechanically; with ~3.2 pushes per episode about a third of hold attempts died
+  # to a disturbance no policy could survive. 0.30 keeps the perturbation but can no longer
+  # break the speed cap on its own (a quiet stand reads |v| ~0.04, and 0.04 + 0.30 < 0.40).
+  # The calibrated 0.6 m/s TASK shove, which the grace window does cover, remains the thing
+  # that tests the hold.
+  push_vel_xy: 0.3
+eval:
+  interval_iterations: 50
+  num_episodes: 32
+  num_envs: 64
+  video_every_n_evals: 10
+  video_on_best: true
+  video_width: 640
+  video_height: 480
+  video_fps: 50
+  keep_last_videos: 12
+log:
+  checkpoint_interval_iterations: 100
+  keep_last_checkpoints: 24
+  log_interval_iterations: 1
+getup:
+  ball_enabled: false
+  # E33. The shove writes 0.6 m/s into qvel against conjunct 13's 0.4 m/s cap, so for twelve
+  # runs it voided the success predicate by arithmetic on every hold attempt: measured, a
+  # perfect stand reached at best 186 of the 250 needed steps with the shove on and 330 with
+  # it off. These 50 steps (0.40 s) forgive ONLY the velocity conjunct, only after a shove
+  # this task itself fired. Pose conjuncts 1-12 are never forgiven: a body that topples still
+  # fails instantly, so the shove still tests what it was built to test.
+  hold_push_grace: 50
+  # E34: the big salary must be EXPERIENCED, not rumoured. 30% of resets start standing so
+  # the stand/hold/latch terms pay from iteration 1 and the critic learns their value while
+  # the floor envs are still learning to rise. Standing resets stay excluded from the
+  # success denominator, so this buys learning signal, not fake success.
+  standing_reset_frac: 0.20
+  # E35: the pre-registered E34 response, deployed on its trigger (floor-parking stable for
+  # 600 iterations, standing_frac 0.0% on all 21 evaluations). Rungs BETWEEN floor and
+  # stand: 60 each of all-fours, kneel, half-kneel, squat, crouch, pelvis 0.27-0.70, mined
+  # as physical equilibria (see scripts/generate_midrise_poses.py and LOGBOOK E34b).
+  # Excluded from the success denominator exactly like standing starts.
+  # E40: bank_v3 adds 160 mid-rise states WITH upward momentum (time-reversed descents,
+  # each proven completable by plain servos). The discovery bridge for the catch skill.
+  bank_path: data/fallen/bank_v3.npz
+  # E36: 0.25 -> 0.40. The E35 pool probe located the missing link precisely: rung starts
+  # slide DOWN to sitting instead of pushing up the last two rungs, while placed stands
+  # already hold to 127 of the 250 needed steps. More rung exposure attacks that exact gap.
+  midrise_reset_frac: 0.10
+  rising_reset_frac: 0.10
+  # E42: full-reference imitation, the conceptual change demanded after twenty runs. 30% of
+  # episodes start ON a synthesized get-up film (supine -> press-up -> tuck -> squat ->
+  # stand, time-reversed gentle descents) at a random phase, paid for staying near it as it
+  # plays. Finite and monotone: unfarmable, ends at the stand where the salary takes over.
+  track_reset_frac: 0.30
+  ref_path: data/fallen/getup_refs_v1.npz
+  w_track: 2.0
+  # E37, the user's sequencing axis: "sit up a little, tuck the feet under, push up from
+  # that crouch". A second potential axis (feet-under-pelvis), loud from the first supine
+  # centimetre where the height axis is silent. Through the potential only, gammas matched:
+  # provably unfarmable. Phi monotone along the sequence, verified before launch.
+  shaping_tuck_gain: 0.25
+  # E39: the exam ladder. Sixteen runs never passed the full exam once; HumanUP (the only
+  # published real-robot get-up) relaxes first and tightens later. Levels relax ONLY knee
+  # angle and hold duration; reporting never relaxes (standing_frac_strict, success counts
+  # full-exam-at-final-level only).
+  exam_enabled: true

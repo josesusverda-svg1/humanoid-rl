@@ -529,6 +529,58 @@ def check_checkpoint(path: Path, config) -> list[Finding]:
 
 
 @check
+def value_support_covers_reachable_return(config) -> list[Finding]:
+    """A distributional critic's grid must reach the returns the reward function can pay.
+
+    This is the quietest catastrophic failure available in the whole method. C51 puts
+    probability mass on a FIXED grid from v_min to v_max. If the reachable discounted return
+    exceeds v_max, every good state piles its mass on the top atom, the critic returns the
+    same number for "walking beautifully" and "barely upright", and the actor gets no
+    gradient distinguishing them. The critic loss goes down the whole time, because
+    predicting a saturated target is easy. Nothing anywhere looks wrong.
+
+    The two sides are specified independently, which is what makes the check worth having:
+    v_max is a number in the FastTD3 config, and the reachable return falls out of the task's
+    reward weights and gamma. The FastTD3 authors' own IsaacLab preset is +/-10, correct for
+    IsaacLab's tiny rewards and off by a factor of 30 for ours.
+    """
+    if getattr(config.run, "algo", "ppo") != "fasttd3":
+        return []
+    td3 = config.fasttd3
+    task = config.task
+    # Upper bound on per-step reward: every positive term at full value, penalties ignored.
+    # Deliberately optimistic, because the support has to cover the best case, not the mean.
+    positive = sum(max(getattr(task, name, 0.0), 0.0) for name in dir(task)
+                   if name.startswith("w_"))
+    ceiling = positive / max(1.0 - td3.gamma, 1e-9)
+
+    out: list[Finding] = []
+    if td3.v_max < ceiling:
+        out.append(Finding(
+            Severity.CONTRADICTION, "value support",
+            f"v_max is {td3.v_max:.0f} but the reward weights allow a discounted return of "
+            f"{ceiling:.0f} at gamma={td3.gamma}. Returns above v_max saturate on the top "
+            f"atom, so the critic cannot rank good states against each other.",
+            remedy=f"Set v_max to at least {ceiling * 1.25:.0f}, or use "
+                   f"humanoid_rl.algos.fasttd3.suggested_support().",
+            caught_before="Not yet. This check exists because the failure is invisible: the "
+                          "critic loss falls normally while the value function is constant.",
+        ))
+    # A "value resolution" sub-check used to live here, warning when an atom spanned more
+    # than half a step's reward because "one step of improvement may not move the target".
+    # REMOVED: it was wrong, and a wrong check is worse than no check because it teaches the
+    # reader to skim findings. The categorical projection is exactly mean-preserving, and the
+    # actor consumes only E[Q] = sum(p * z), which is continuous in the probabilities at any
+    # atom spacing. Coarse atoms limit how finely the SHAPE of the return distribution can be
+    # represented; they do not quantise the quantity the policy gradient actually uses. The
+    # saturation check above is the real failure mode and it stays.
+    return out or [Finding(
+        Severity.OK, "value support",
+        f"[{td3.v_min:.0f}, {td3.v_max:.0f}] over {td3.num_atoms} atoms covers a reachable "
+        f"{ceiling:.0f}")]
+
+
+@check
 def curriculum_floor_is_worth_training_on(config) -> list[Finding]:
     """The curriculum's FLOOR must still command a speed worth practising.
 
@@ -572,6 +624,516 @@ def curriculum_floor_is_worth_training_on(config) -> list[Finding]:
     return out or [Finding(
         Severity.OK, "curriculum floor",
         f"floor {task.difficulty_min} commands a median {floor_median:.2f} m/s")]
+
+
+@check
+def getup_hold_and_thresholds_are_reachable(config) -> list[Finding]:
+    """The get-up hold, episode length and force thresholds must be mutually satisfiable.
+
+    Four independent specifications have to agree here and nothing in the code forces them to:
+    the hold duration (seconds), the control rate (physics timestep x decimation), the episode
+    limit (steps), and the domain randomisation mass range. Each has been an independent
+    source of failure in this project.
+    """
+    import numpy as np
+
+    if getattr(config.run, "task", "") != "getup":
+        return []
+    cfg = config.getup
+    out: list[Finding] = []
+
+    # 1. The hold must be an exact number of control steps. E18: a step count copied from a
+    # 50 Hz reference silently became 8 s on our 125 Hz loop while every comment said 20 s.
+    from humanoid_rl.envs.model_prep import prepare
+
+    prepared = prepare(Path(__file__).resolve().parents[2] / config.env.model_path)
+    dt = float(prepared.model.opt.timestep) * config.env.decimation
+    steps = cfg.hold_seconds / dt
+    if abs(steps - round(steps)) > 1e-6:
+        out.append(Finding(
+            Severity.SUSPECT, "hold duration",
+            f"hold_seconds {cfg.hold_seconds} is {steps:.2f} control steps at {1/dt:.0f} Hz, "
+            f"not a whole number.",
+            remedy=f"Use a multiple of {dt:.4f} s.",
+        ))
+
+    # 2. The episode must be long enough to fail, recover and still hold. An episode barely
+    # longer than the hold makes success a matter of where the reset happened to land.
+    if config.env.max_episode_steps < 3 * round(steps):
+        out.append(Finding(
+            Severity.CONTRADICTION, "episode vs hold",
+            f"episode is {config.env.max_episode_steps} steps and the hold needs "
+            f"{round(steps)}. Less than 3x leaves no room to get up, be shoved, and recover.",
+            remedy=f"Set max_episode_steps to at least {3 * round(steps)}.",
+        ))
+
+    # 3. The foot-force thresholds are fractions of NOMINAL weight, but domain randomisation
+    # scales real mass. At the light end a genuine stand must still clear them, or U becomes
+    # unsatisfiable on part of the model pool and the policy is being asked for the impossible.
+    light = min(config.domain_rand.mass_scale_range) if config.domain_rand.enabled else 1.0
+    if cfg.u_force_total_bw >= light:
+        out.append(Finding(
+            Severity.CONTRADICTION, "foot force vs mass randomisation",
+            f"u_force_total_bw {cfg.u_force_total_bw} is not below the lightest sampled mass "
+            f"scale {light}. A real stand on a light model cannot satisfy it.",
+            remedy=f"Keep u_force_total_bw below {light:.2f}, or narrow mass_scale_range.",
+        ))
+    if 2.0 * cfg.u_force_min_bw > cfg.u_force_total_bw + 1e-9:
+        out.append(Finding(
+            Severity.CONTRADICTION, "foot force split",
+            f"2 x u_force_min_bw ({2*cfg.u_force_min_bw}) exceeds u_force_total_bw "
+            f"({cfg.u_force_total_bw}), so the per-foot floor implies more than the total.",
+            remedy="Set u_force_min_bw below half of u_force_total_bw.",
+        ))
+
+    # 4. The pose bank must exist and match this model. A stale artefact is a live hazard
+    # here: this repo already has a directory named ABANDONED-staleClips-tracking.
+    bank = Path(__file__).resolve().parents[2] / cfg.bank_path
+    if not bank.exists():
+        out.append(Finding(
+            Severity.CONTRADICTION, "pose bank",
+            f"no fallen-pose bank at {cfg.bank_path}",
+            remedy="python scripts/generate_fallen_poses.py",
+        ))
+    else:
+        data = np.load(bank, allow_pickle=False)
+        if int(data["nq"]) != prepared.model.nq:
+            out.append(Finding(
+                Severity.CONTRADICTION, "pose bank",
+                f"bank nq {int(data['nq'])} against model nq {prepared.model.nq}",
+                remedy="Rebuild the bank for this model."))
+        else:
+            # Left/right balance. The humanoid is bilaterally symmetric, so a bank that
+            # lands mostly on one shoulder trains a policy that can only rise one way, and
+            # the class counts alone will not show it if the label uses abs().
+            lab = data["label"]
+            left = int((lab == "side_left").sum())
+            right = int((lab == "side_right").sum())
+            if left + right >= 20:
+                share = left / (left + right)
+                if not 0.35 <= share <= 0.65:
+                    out.append(Finding(
+                        Severity.SUSPECT, "pose bank balance",
+                        f"side-lying poses are {share:.0%} left-down against {1-share:.0%} "
+                        f"right-down ({left} vs {right}). A bilaterally symmetric body should "
+                        f"see both roughly equally.",
+                        remedy="Rebuild the bank, or check the topple generator's impulse "
+                               "direction sampling."))
+            floor = float((data["generator"] != "standing").mean())
+            if floor < 0.5:
+                out.append(Finding(
+                    Severity.SUSPECT, "pose bank",
+                    f"only {floor:.0%} of the bank is on the floor; the task is mostly "
+                    f"resetting into a stand it does not have to earn."))
+
+    # 5. The shaping must telescope. At gamma < 1 the -(1-gamma)*Phi drain scales with the
+    # weight, and at a weight large enough to matter it swamps every real reward term.
+    if cfg.shaping_weight > 0:
+        drain = cfg.shaping_weight * (1.0 - cfg.shaping_gamma)
+        if drain > 0.10:
+            out.append(Finding(
+                Severity.CONTRADICTION, "shaping drain",
+                f"weight {cfg.shaping_weight} at gamma {cfg.shaping_gamma} costs "
+                f"{drain:.2f}/step simply for being upright, against a standing reward near "
+                f"4.3. The shaping would dominate the objective it is meant to assist.",
+                remedy="Cut the weight. Do NOT reach for shaping_gamma = 1.0: this remedy "
+                       "used to say that, and it is exactly the reward pump that "
+                       "shaping_gamma_matches_rl_gamma now forbids (E31).",
+                caught_before="Measured at weight 5 and gamma 0.99: rising at 0.3 m/s scored "
+                              "NEGATIVE, because the drain exceeded the progress term."))
+
+    return out or [Finding(
+        Severity.OK, "getup setup",
+        f"hold {round(steps)} steps of a {config.env.max_episode_steps}-step episode, "
+        f"force floor {cfg.u_force_total_bw} under a {light} light-mass draw")]
+
+
+@check
+def exploration_has_a_ceiling(config) -> list[Finding]:
+    """`log_std_max` must actually bound exploration, not merely exist.
+
+    This project has now lost runs to log_std in BOTH directions, which is why the check
+    covers both:
+
+    * E05: log_std was INITIALISED above its own ceiling. `torch.clamp` passes no gradient
+      strictly outside its range, so the parameter froze at std 1.0 for 610 iterations.
+    * E30: log_std_max was 5.0, which is std 148 and therefore no ceiling at all. With a
+      positive entropy bonus and nothing pulling back, exploration ran 0.79 -> 3.43 on an
+      action range of [-1, 1], the policy drowned in its own noise, and eval return fell from
+      833 at iteration 300 to 19 at iteration 900.
+
+    A ceiling above about std 2 is not a ceiling: past that, most sampled actions clip
+    against the action range and the policy is closer to noise than to a policy.
+    """
+    import math
+
+    ppo = config.ppo
+    ceiling = math.exp(ppo.log_std_max)
+    init = config.network.init_noise_std
+    out: list[Finding] = []
+    if ceiling > 2.0:
+        out.append(Finding(
+            Severity.CONTRADICTION, "exploration ceiling",
+            f"log_std_max {ppo.log_std_max} allows std {ceiling:.1f} on an action range of "
+            f"[-1, 1]. Above std 2 most samples clip and the policy is mostly noise.",
+            remedy="Set log_std_max near 0.0 (std 1.0). Walking trained fine at 0.4-1.4.",
+            caught_before="Exploration ran 0.79 -> 3.43 and eval return collapsed 833 -> 19 "
+                          "between iterations 300 and 900.",
+        ))
+    if init > ceiling:
+        out.append(Finding(
+            Severity.CONTRADICTION, "exploration ceiling",
+            f"init_noise_std {init} starts ABOVE the ceiling {ceiling:.2f}. clamp passes no "
+            f"gradient strictly outside its range, so log_std would be frozen from step one.",
+            remedy=f"Set init_noise_std at or below {ceiling:.2f}.",
+            caught_before="E05: frozen at std 1.0 for 610 iterations.",
+        ))
+    return out or [Finding(
+        Severity.OK, "exploration ceiling",
+        f"std capped at {ceiling:.2f}, starting from {init}")]
+
+
+@check
+def external_impulses_cannot_void_the_hold(config) -> list[Finding]:
+    """No impulse the setup itself injects may violate the success predicate by arithmetic.
+
+    The get-up hold requires |v| <= u_lin_speed CONSECUTIVELY for hold_seconds. Two mechanisms
+    write velocity straight into qvel, bypassing the actuators, so no policy can resist them:
+    the task's own hold shove, and the domain-randomisation push. If either exceeds the speed
+    cap without a corresponding forgiveness, the predicate is unsatisfiable BY CONSTRUCTION
+    and every run is optimising toward a goal that cannot be reached.
+
+    E33: hold_push_vel 0.6 against u_lin_speed 0.4, no grace, fired inside every attempt at
+    step 40-140 of the 250 needed, and the miss re-armed it. Twelve runs read standing_frac
+    exactly 0.0% and the conclusion drawn each time was about the reward. Measured: a perfect
+    stand reached 186/250 with the shove on and 330/250 with it off.
+
+    The comparison is between independently specified things: an impulse magnitude (task or
+    engine setting), a predicate threshold (task setting), and the forgiveness bookkeeping.
+    """
+    if getattr(config.run, "task", "") != "getup":
+        return []
+    cfg = config.getup
+    out: list[Finding] = []
+
+    grace = int(getattr(cfg, "hold_push_grace", 0))
+    if cfg.hold_push_vel > cfg.u_lin_speed and grace <= 0:
+        out.append(Finding(
+            Severity.CONTRADICTION, "hold vs task shove",
+            f"hold_push_vel {cfg.hold_push_vel} m/s is written into qvel against a "
+            f"u_lin_speed cap of {cfg.u_lin_speed}, with no grace window. The shove violates "
+            f"the hold by arithmetic on every attempt; no policy can complete it, ever.",
+            remedy="Set hold_push_grace to ~0.4 s of steps (forgiving ONLY the velocity "
+                   "conjunct), or push below the cap.",
+            caught_before="E33: twelve runs with standing_frac exactly 0.0%.",
+        ))
+
+    # The engine push is invisible to the task, so NO grace can cover it. Its ceiling has to
+    # clear the cap with room for the quiet-stand velocity (~0.05 m/s measured).
+    if config.domain_rand.enabled and config.domain_rand.push_vel_xy > 0.85 * cfg.u_lin_speed:
+        out.append(Finding(
+            Severity.CONTRADICTION, "hold vs domain-rand push",
+            f"domain_rand.push_vel_xy {config.domain_rand.push_vel_xy} m/s against a "
+            f"u_lin_speed cap of {cfg.u_lin_speed}. The engine push is invisible to the task "
+            f"(no flag reaches it), so the grace window cannot cover it and part of all hold "
+            f"attempts die to a disturbance no policy could survive.",
+            remedy=f"Keep push_vel_xy at or below {0.85 * cfg.u_lin_speed:.2f} "
+                   f"(0.85x the cap, leaving margin for quiet-stand velocity).",
+            caught_before="E33: at 0.7 roughly a third of hold windows were voided.",
+        ))
+
+    # The grace must forgive a settling transient, not the hold itself.
+    if grace > 0:
+        from humanoid_rl.envs.model_prep import prepare
+        prepared = prepare(Path(__file__).resolve().parents[2] / config.env.model_path)
+        dt = float(prepared.model.opt.timestep) * config.env.decimation
+        hold_steps = cfg.hold_seconds / dt
+        if grace >= 0.5 * hold_steps:
+            out.append(Finding(
+                Severity.CONTRADICTION, "grace vs hold",
+                f"hold_push_grace {grace} steps is {grace/hold_steps:.0%} of the "
+                f"{hold_steps:.0f}-step hold. Forgiving that much of the hold's own clock "
+                f"stops it being a hold.",
+                remedy="Keep the grace well under half the hold, ~0.4 s.",
+            ))
+    return out or [Finding(
+        Severity.OK, "external impulses",
+        f"shove {cfg.hold_push_vel} graced {grace} steps (velocity conjunct only); "
+        f"engine push {config.domain_rand.push_vel_xy} under the {cfg.u_lin_speed} cap")]
+
+
+@check
+def discount_horizon_covers_the_task(config) -> list[Finding]:
+    """The discount horizon must be longer than the longest thing the task asks for.
+
+    `gamma` is dimensionless per STEP, so its meaning in seconds depends entirely on the
+    control rate. Copying it between repos at different rates silently changes the horizon,
+    and nothing anywhere in the code will complain.
+
+    E31: `gamma = 0.99` was taken from legged_gym, which runs at 50 Hz and therefore gets a
+    2.0 s horizon from it. This repo runs at 125 Hz, where the same number is 0.80 s. The
+    get-up task asks the humanoid to stand and HOLD for 2.0 s: at that discount a successful
+    hold is worth 0.081 of an immediate reward, and a 4 s get-up followed by the hold is worth
+    0.00053. The task's own success criterion sat outside the agent's horizon for every
+    get-up run in the project, so no reward change could ever have reached it.
+
+    Same root as E19, where `max_episode_steps = 1000` was copied from 50 Hz and produced 8 s
+    episodes while every comment in the repo said 20 s.
+
+    The comparison is between two INDEPENDENTLY specified things: gamma (an algorithm setting)
+    and the duration the task requires (a task setting), coupled only through the physics
+    timestep and decimation.
+    """
+    from humanoid_rl.envs.model_prep import prepare
+
+    ppo = config.ppo
+    if ppo.gamma >= 1.0:
+        return [Finding(
+            Severity.CONTRADICTION, "discount horizon",
+            f"gamma {ppo.gamma} is not below 1, so the discounted return need not converge.",
+            remedy="Use gamma < 1.")]
+
+    prepared = prepare(Path(__file__).resolve().parents[2] / config.env.model_path)
+    dt = float(prepared.model.opt.timestep) * config.env.decimation
+    horizon_s = dt / (1.0 - ppo.gamma)
+
+    # What the task actually asks for, in seconds. Each entry is (name, seconds).
+    needs: list[tuple[str, float]] = []
+    if getattr(config.run, "task", "") == "getup":
+        hold = float(config.getup.hold_seconds)
+        # A get-up is the hold PLUS the rise that has to precede it. Measured on this project's
+        # own rollouts, a rise takes 2-4 s from supine, so the episode's payoff sits at least
+        # hold + 2 s away from the reset state.
+        needs.append(("the hold alone", hold))
+        needs.append(("a rise plus the hold", hold + 2.0))
+    else:
+        # Walking is cyclic: the longest thing it asks for is a full gait cycle, after which
+        # the state repeats and a short horizon is genuinely enough.
+        freq = getattr(config.task, "gait_frequency", None)
+        if freq:
+            needs.append(("one gait cycle", 1.0 / float(freq)))
+
+    out: list[Finding] = []
+    for name, seconds in needs:
+        if horizon_s < seconds:
+            weight = ppo.gamma ** (seconds / dt)
+            out.append(Finding(
+                Severity.CONTRADICTION, "discount horizon",
+                f"gamma {ppo.gamma} at {1/dt:.0f} Hz is a {horizon_s:.2f} s horizon, but the "
+                f"task needs {name} at {seconds:.1f} s. A reward that far away is discounted "
+                f"to {weight:.4f}, so the agent is being asked for something it cannot see.",
+                remedy=f"Set gamma to at least "
+                       f"{1.0 - dt / (2.0 * seconds):.4f} for a horizon of 2x {seconds:.1f} s, "
+                       f"or shorten what the task requires.",
+                caught_before="E31: a 2 s hold discounted to 0.081. The policy learned to "
+                              "cycle up and down instead, because the pump paid sooner.",
+            ))
+    return out or [Finding(
+        Severity.OK, "discount horizon",
+        f"gamma {ppo.gamma} at {1/dt:.0f} Hz is {horizon_s:.2f} s, covering "
+        + (", ".join(f"{n} ({s:.1f} s)" for n, s in needs) if needs else "no stated requirement"))]
+
+
+@check
+def shaping_gamma_matches_rl_gamma(config) -> list[Finding]:
+    """Potential-based shaping is only policy-invariant when its gamma IS the RL gamma.
+
+    Ng, Harada & Russell (1999) prove that adding `F(s, s') = g*Phi(s') - Phi(s)` leaves the
+    optimal policy unchanged. The proof is that the DISCOUNTED sum telescopes:
+
+        sum_t g^t (g*Phi(s_{t+1}) - Phi(s_t))  =  -Phi(s_0) + lim g^T Phi(s_T)
+
+    which depends only on the start state. That telescoping requires the g in the shaping to
+    be the same g the agent discounts with. With a different one, say g_shape = 1:
+
+        sum_t g^t (Phi(s_{t+1}) - Phi(s_t))
+
+    does not telescope. Each rise is discounted less than the fall that undoes it, so a closed
+    up-and-down loop nets a PROFIT and the shaping becomes a reward pump.
+
+    E31, measured on the final policy over 9.6 s and 64 envs: the shaping paid out 613.8 and
+    clawed back -591.5. Undiscounted that nets 22.3, which is why the code comment claiming
+    "oscillating the pelvis up and down pays exactly zero" looked right. Discounted at the
+    gamma PPO actually maximises it nets 44.7, larger than its own undiscounted value and
+    larger than every other reward term combined: 58% of the whole signal, all of it earned by
+    cycling. The humanoid learned to jump to 1.28 m with zero ground contact and land on his
+    head, roughly four times per 10 seconds.
+
+    The reason the mismatch was introduced was real: at gamma 0.99 the standing drain
+    -(1-g)*Phi costs weight*0.01*Phi per step, which at weight 150 is about 1.0/step and
+    swamps every honest term. That argument is a reason to raise gamma or lower the weight,
+    not to break the proof. This check reports the drain so the trade is visible.
+    """
+    if getattr(config.run, "task", "") != "getup":
+        return []
+    g_rl = float(config.ppo.gamma)
+    g_shape = float(config.getup.shaping_gamma)
+    weight = float(config.getup.shaping_weight)
+    if abs(g_shape - g_rl) > 1e-9:
+        return [Finding(
+            Severity.CONTRADICTION, "shaping gamma",
+            f"shaping_gamma {g_shape} != ppo.gamma {g_rl}, so the potential shaping does not "
+            f"telescope in the discounted sum and an up-and-down cycle pays a profit.",
+            remedy=f"Set shaping_gamma to {g_rl}. The standing drain that argument was made "
+                   f"against is weight*(1-gamma)*Phi = {weight*(1-g_rl)*0.7:.3f}/step at "
+                   f"Phi=0.7 and weight {weight}; if that is too large, lower the weight "
+                   f"rather than the gamma.",
+            caught_before="E31: 58% of the reward signal was a pump earned by jumping to "
+                          "1.28 m with no ground contact and landing on his head.",
+        )]
+    return [Finding(
+        Severity.OK, "shaping gamma",
+        f"matches ppo.gamma at {g_rl}; standing drain "
+        f"{weight*(1-g_rl)*0.7:.3f}/step at Phi=0.7")]
+
+
+@check
+def terrain_field_is_bigger_than_an_episode(config) -> list[Finding]:
+    """An episode must not be able to walk off the edge of the world.
+
+    Past the heightfield's extent there is no geom at all, so the humanoid falls into the
+    void. That is recorded as an ordinary termination, so it arrives in the metrics as
+    `fall_rate` and reads as a policy failure -- a geometry error wearing the costume of the
+    headline number. The same class as E16, where an eval that counted the wrong episodes
+    invalidated every fall rate in the project.
+
+    Budget: the largest forward command, held for a whole episode, times the measured
+    achieved/commanded speed ratio, starting from the worst corner of the spawn square.
+    """
+    t = getattr(config, "terrain", None)
+    if t is None or not t.enabled:
+        return [Finding(Severity.OK, "terrain extent", "terrain disabled")]
+
+    dt = config.env.decimation * 0.002
+    episode_s = config.env.max_episode_steps * dt
+    top_speed = max(abs(v) for v in config.task.lin_vel_x_range)
+    # 0.79 is measured (0.586 achieved against 0.738 commanded on the flat run). Using the
+    # ratio rather than the raw command is deliberate: quoting the command would size the
+    # field for a policy that does not exist, and quoting the achieved speed alone would
+    # size it for the policy that exists TODAY.
+    reach = t.spawn_half_extent + top_speed * 0.79 * episode_s
+    if reach > t.half_extent:
+        return [Finding(
+            Severity.CONTRADICTION, "terrain extent",
+            f"an episode can reach {reach:.1f} m from the origin "
+            f"(spawn {t.spawn_half_extent} m + {top_speed} m/s x 0.79 x {episode_s:.1f} s) "
+            f"but the field only extends to {t.half_extent} m. Off the field there is no "
+            f"geom, so the humanoid falls into the void and it is counted as a fall.",
+            remedy=f"Raise terrain.half_extent above {reach:.1f}, or lower "
+                   f"terrain.spawn_half_extent. Extent is nearly free: collision cost is set "
+                   f"by cell size, not by grid size.",
+            caught_before="Measured: hfield cost is 2.01x the plane at a 0.10 m cell whether "
+                          "the field is 4 m or 40 m across.",
+        )]
+    return [Finding(Severity.OK, "terrain extent",
+                    f"worst reach {reach:.1f} m inside a {t.half_extent} m half-extent")]
+
+
+@check
+def terrain_is_rough_enough_to_matter_and_not_so_rough_it_takes_over(config) -> list[Finding]:
+    """The relief must be hard enough to teach and inside what has been measured.
+
+    REVISED after the model this check originally used was refuted by measurement.
+
+    The first version derived a ceiling from the gait clock: stride-to-stride ground change
+    becomes a touchdown TIMING error, and past the stance transition width the terrain rather
+    than the policy would be what loses `gait_phase` (27.8% of the reward). It put the ceiling
+    near 7 cm. Measured on a trained walker, deterministic, 1.0 m/s, 64 envs x 400 steps:
+
+        p2p     gait_phase reward/step
+        0.00 cm      0.8054
+        5.25 cm      0.7967
+        9.00 cm      0.7802
+       14.00 cm      0.7242
+       20.00 cm      0.6957
+
+    At 20 cm -- nearly 3x that ceiling -- gait_phase has fallen 13.6%, and `torso_upright`
+    barely moves (0.527 -> 0.515). The clock is not taken away. What rough ground actually
+    costs is SPEED: `lin_vel` 0.584 -> 0.299, a 49% loss at 20 cm. The old model predicted the
+    wrong quantity would break, so it cannot set the bound.
+
+    This version bounds on what was actually measured, in both directions:
+
+    * TOO FLAT is the real risk on a warm start, and the first version had no opinion on it.
+      Zero-shot falls for a trained walker: 5.25 cm -> 6.2%, i.e. it already solves 94% of the
+      field and the run would most likely return NO EFFECT while being reported as terrain
+      training. Below 8 cm is flagged.
+    * TOO ROUGH is bounded at 20 cm because that is the largest relief anyone has measured
+      here (64.1% zero-shot falls, at which point a warm start is barely on-distribution).
+      Above it is UNMEASURED, not known-bad, and the finding says so rather than pretending
+      to a physical limit.
+    """
+    t = getattr(config, "terrain", None)
+    if t is None or not t.enabled:
+        return [Finding(Severity.OK, "terrain amplitude", "terrain disabled")]
+
+    p2p = t.amplitude_p2p
+    if p2p > 0.20:
+        return [Finding(
+            Severity.SUSPECT, "terrain amplitude",
+            f"relief {p2p*100:.1f} cm is above the 20 cm that has ever been measured on this "
+            f"body. At 20 cm a trained walker already falls 64% zero-shot, so a warm start "
+            f"above that is probably off-distribution -- but this is UNMEASURED, not known "
+            f"to be wrong.",
+            remedy="Measure zero-shot falls at this relief before spending a run on it.",
+        )]
+    if p2p < 0.08:
+        return [Finding(
+            Severity.SUSPECT, "terrain amplitude",
+            f"relief {p2p*100:.2f} cm is mild: a trained walker takes only ~6% zero-shot falls "
+            f"at 5.25 cm, so there may be nothing to learn and the run can return NO EFFECT "
+            f"while being reported as terrain training.",
+            remedy="Raise terrain.amplitude_p2p toward 0.14, where zero-shot falls are 36% and "
+                   "64% of episodes still survive, or accept this as a control run.",
+            caught_before="The first terrain run was configured at 5.25 cm on an argument "
+                          "about the gait clock that measurement later refuted.",
+        )]
+    return [Finding(Severity.OK, "terrain amplitude",
+                    f"{p2p*100:.1f} cm p2p, inside the measured 8-20 cm band")]
+
+
+@check
+def terrain_cell_supports_a_box_foot(config) -> list[Finding]:
+    """A foot must rest on more than one contact point.
+
+    Box feet were a deliberate model choice: MuJoCo's default capsule feet are line contacts
+    and physically cannot produce a heel-to-toe roll (README.md:66). A heightfield cell
+    coarser than the foot re-creates exactly that defect, because the foot bridges a single
+    cell and can transmit no ankle torque from the ground. Measured on this body: at a
+    0.15 m cell the median is 3 contacts per foot but the MINIMUM is 1; at 0.10 m the
+    minimum is 2.
+    """
+    t = getattr(config, "terrain", None)
+    if t is None or not t.enabled:
+        return [Finding(Severity.OK, "terrain cell", "terrain disabled")]
+    # The MimicKit foot is 0.177 x 0.090 m (geom half-sizes 0.0885 x 0.045). Contacts land
+    # on grid vertices under the footprint, so the count along an axis is roughly
+    # length/cell + 1. The binding requirement is on the LONG axis: it must span at least
+    # 1.5 cells, so at least two grid lines cross the foot and it cannot pivot on one point.
+    #
+    # Calibrated against the measured contact minimum rather than asserted: at cell 0.150 m
+    # the median is 3 contacts per foot but the MINIMUM is 1; at 0.100 m the minimum is 2.
+    # 0.177 / 1.5 = 0.118 m puts the bound between the two measurements, which is where a
+    # threshold derived from a model and checked against data should land.
+    foot_long = 0.177
+    max_cell = foot_long / 1.5
+    if t.cell > max_cell:
+        return [Finding(
+            Severity.CONTRADICTION, "terrain cell",
+            f"cell {t.cell:.3f} m exceeds {max_cell:.3f} m, so the foot's {foot_long:.3f} m "
+            f"long axis spans fewer than 1.5 cells and can rest on a single contact point. "
+            f"Measured at 0.150 m: median 3 contacts per foot, minimum 1. That is the "
+            f"line-contact defect box feet were chosen to avoid.",
+            remedy="Set terrain.cell at or below 0.10 m (measured minimum 2 contacts). Cost "
+                   "is 2.01x the plane there, and depends on cell size only, never on the "
+                   "field's extent.",
+            caught_before="README.md:66 -- capsule feet are line contacts and physically "
+                          "cannot produce a heel-to-toe roll, which is why this model has "
+                          "box feet at all.",
+        )]
+    return [Finding(Severity.OK, "terrain cell",
+                    f"cell {t.cell:.3f} m spans the {foot_long:.3f} m foot "
+                    f"{foot_long / t.cell:.1f} times (bound {max_cell:.3f} m)")]
 
 
 def run_all(config, checkpoint: Path | None = None) -> list[Finding]:

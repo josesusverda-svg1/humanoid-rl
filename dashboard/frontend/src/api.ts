@@ -1,4 +1,4 @@
-import type { MetricsResponse, RunEvent, RunSummary, VideoEntry } from './types'
+import type { CompareRow, GetupSeries, Inspection, LogbookEntry, MetricsResponse, RunEvent, RunSummary, VideoEntry } from './types'
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(path)
@@ -26,6 +26,15 @@ export const api = {
   videos: (runId: string) => get<VideoEntry[]>(`/api/runs/${encodeURIComponent(runId)}/videos`),
 
   config: (runId: string) => get<Record<string, unknown>>(`/api/runs/${encodeURIComponent(runId)}/config`),
+
+  getup: (runId: string, maxPoints = 700) =>
+    get<GetupSeries>(`/api/runs/${encodeURIComponent(runId)}/getup?max_points=${maxPoints}`),
+
+  inspection: () => get<Inspection>('/api/inspection'),
+
+  logbook: () => get<LogbookEntry[]>('/api/logbook'),
+
+  compare: () => get<CompareRow[]>('/api/getup/compare'),
 }
 
 /** Compact number formatting for stat tiles: 1.2M, 45.3k, 0.87. */

@@ -42,6 +42,17 @@ DEFAULT_VIEWS: tuple[tuple[str, float], ...] = (
     ("front-right", 315.0),
 )
 
+#: Views for a task where the body starts on the FLOOR. A get-up happens mostly in the
+#: sagittal plane (fold, plant, push, rise), so the side views carry the information and the
+#: front view mostly shows a silhouette. Fewer views, and biased to the side, because the
+#: question here is "did the pelvis leave the ground and how", not "is the gait symmetric".
+GETUP_VIEWS: tuple[tuple[str, float], ...] = (
+    ("left", 90.0),
+    ("front-left", 45.0),
+    ("front", 0.0),
+    ("right", 270.0),
+)
+
 #: Bodies to draw and the segments between them. Taken from the model's own body tree at
 #: capture time, so this is only the fallback ordering for presentation.
 TRAIL_BODIES = ("left_foot", "right_foot", "left_hand", "right_hand")
@@ -181,7 +192,12 @@ def capture(
     env.reset()
     with torch.no_grad():
         for step in range(settle_steps + keep_steps):
-            env.state.task_state["command"][0] = np.asarray(command, dtype=np.float64)
+            # Tasks without a velocity command (get-up) have no such key. Writing it
+            # unconditionally raised KeyError, and because visualisation failures are
+            # swallowed so they cannot kill a long run, the get-up run produced ZERO
+            # videos and zero flip-books for 2000 iterations while reporting nothing.
+            if "command" in env.state.task_state:
+                env.state.task_state["command"][0] = np.asarray(command, dtype=np.float64)
             env._compute_obs()  # noqa: SLF001 - refresh the command in the observation
             action = policy.act_deterministic(
                 torch.from_numpy(env._obs.copy()).to(device)  # noqa: SLF001
