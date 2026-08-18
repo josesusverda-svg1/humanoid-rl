@@ -136,6 +136,68 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- supersed
 
 Newest first. `E##  date  what changed`.
 
+### E57  2026-08-18  The terrain was too flat, and the argument that chose it was wrong
+
+**"It's not so rough, the terrain."** That was the whole prompt, and it was right.
+
+**The refuted argument.** E55 set relief at 5.25 cm as 0.75 of a 7 cm "ceiling", derived from
+the gait clock: stride-to-stride ground change becomes a touchdown timing error, and past the
+stance transition width the TERRAIN rather than the policy would be what loses `gait_phase`,
+27.8% of the reward budget. Measured on E54's walker, deterministic, 1.0 m/s, 64 envs:
+
+| p2p | gait_phase | lin_vel | torso_upright | zero-shot falls |
+|---|---|---|---|---|
+| 0.00 cm | 0.8054 | 0.5844 | 0.5272 | 0.0% |
+| 5.25 cm | 0.7967 | 0.5237 | 0.5236 | **6.2%** |
+| 9.00 cm | 0.7802 | 0.4697 | 0.5220 | 9.4% |
+| 14.00 cm | 0.7242 | 0.3941 | 0.5229 | **35.9%** |
+| 20.00 cm | 0.6957 | 0.2988 | 0.5146 | 64.1% |
+
+**At 20 cm, nearly 3x the supposed ceiling, `gait_phase` has fallen 13.6% and `torso_upright`
+has barely moved.** The clock is not taken away at any relief measured. What rough ground
+actually costs is SPEED: `lin_vel` drops 49%. The model predicted the wrong quantity would
+break, so it could never have set the right number.
+
+**And the number it set was the harmful direction.** At 5.25 cm the trained walker already
+survives 94% of episodes with no training at all. That run would very likely have returned
+NO EFFECT and been written up as "terrain training completed", which is the worst outcome
+available -- not a failure, a false success.
+
+**14 cm chosen from the difficulty ladder rather than from a model**: 35.9% zero-shot falls
+means there is real work, and 64% of episodes still surviving means the warm start is on
+distribution. 20 cm is where a warm start starts to be off-distribution.
+
+**The Oracle invariant I wrote two days ago encoded the refuted model, and it fired on the
+corrected config.** `terrain_is_rough_enough_to_matter_and_not_so_rough_it_takes_over`
+computed the same timing-error ceiling and rejected 14 cm at 1.98x. I rewrote the check
+against the measurements above rather than widening its threshold to fit -- it now flags
+**below 8 cm** as too easy to teach anything (the failure that actually happened) and **above
+20 cm** as unmeasured rather than known-bad, which is what the evidence supports. A check that
+gets loosened whenever it blocks something is a rubber stamp; a check whose model is refuted
+should be rebuilt on the measurement that refuted it.
+
+**Revised baseline for E55's predictions**, which were all stated against 7.8% and must move:
+
+| | old field (5.25 cm) | new field (14 cm) |
+|---|---|---|
+| zero-shot falls, rough | 7.8% | **35.9%** |
+| zero-shot falls, flat | 0.0% | 0.0% |
+
+1. **PRIMARY: deterministic falls on rough <= 12%** at a held 1.0 m/s command. *Reachable*:
+   the same policy takes 6.2% on the 5.25 cm field with no training, so 12% on a field 2.7x
+   rougher is a real but not absurd target. Not trivially met: it must cut 35.9% by two thirds.
+2. **Flat ability is not traded away**: `eval_flat/fall_rate` <= its iteration-100 value + 0.10.
+3. **Terrain is experienced**: `ground_z` spread across spawns > 10 cm. *Guard, not a test.*
+4. **Speed is not paid for survival**: rough speed at the end >= 75% of the same policy's flat
+   speed. Loosened from E55's 90% because the zero-shot measurement above now shows what
+   terrain costs speed -- `lin_vel` 0.584 -> 0.394 at 14 cm, a 33% loss before any adaptation.
+   E55 stated 90% while explicitly admitting I had never measured rough-ground speed; I have
+   now, and 90% was unreachable by construction. Third bar in three days corrected for that.
+5. Nothing is claimed about human-likeness from this run.
+
+Kill criteria unchanged from E55 except K1, whose threshold moves with the baseline: fire if
+rough `eval/fall_rate` > 0.75 at 100 M (started at 0.359).
+
 ### E56  2026-08-18  E55 KILLED at iteration 45. The learning rate, not the warmup
 
 > **CORRECTED an hour after writing, by the four-arm experiment appended at the end.** The

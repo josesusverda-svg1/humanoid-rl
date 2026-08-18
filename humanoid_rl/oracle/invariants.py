@@ -1031,50 +1031,65 @@ def terrain_field_is_bigger_than_an_episode(config) -> list[Finding]:
 
 @check
 def terrain_is_rough_enough_to_matter_and_not_so_rough_it_takes_over(config) -> list[Finding]:
-    """The relief must be visible to the gait clock without drowning it.
+    """The relief must be hard enough to teach and inside what has been measured.
 
-    `gait_phase` is 27.8% of the reward budget and its stance transition is
-    `stance_transition_width` cycles wide. Stride-to-stride ground change converts into a
-    touchdown TIMING error, and once that error exceeds the transition width it is the
-    terrain, not the policy, that loses the clock -- at which point the run measures the
-    ground and no reward change can reach the result.
+    REVISED after the model this check originally used was refuted by measurement.
 
-    Never compare a constant, compare the quantity it stands for (E31b): the amplitude is
-    checked against a time, not against another length.
+    The first version derived a ceiling from the gait clock: stride-to-stride ground change
+    becomes a touchdown TIMING error, and past the stance transition width the terrain rather
+    than the policy would be what loses `gait_phase` (27.8% of the reward). It put the ceiling
+    near 7 cm. Measured on a trained walker, deterministic, 1.0 m/s, 64 envs x 400 steps:
+
+        p2p     gait_phase reward/step
+        0.00 cm      0.8054
+        5.25 cm      0.7967
+        9.00 cm      0.7802
+       14.00 cm      0.7242
+       20.00 cm      0.6957
+
+    At 20 cm -- nearly 3x that ceiling -- gait_phase has fallen 13.6%, and `torso_upright`
+    barely moves (0.527 -> 0.515). The clock is not taken away. What rough ground actually
+    costs is SPEED: `lin_vel` 0.584 -> 0.299, a 49% loss at 20 cm. The old model predicted the
+    wrong quantity would break, so it cannot set the bound.
+
+    This version bounds on what was actually measured, in both directions:
+
+    * TOO FLAT is the real risk on a warm start, and the first version had no opinion on it.
+      Zero-shot falls for a trained walker: 5.25 cm -> 6.2%, i.e. it already solves 94% of the
+      field and the run would most likely return NO EFFECT while being reported as terrain
+      training. Below 8 cm is flagged.
+    * TOO ROUGH is bounded at 20 cm because that is the largest relief anyone has measured
+      here (64.1% zero-shot falls, at which point a warm start is barely on-distribution).
+      Above it is UNMEASURED, not known-bad, and the finding says so rather than pretending
+      to a physical limit.
     """
     t = getattr(config, "terrain", None)
     if t is None or not t.enabled:
         return [Finding(Severity.OK, "terrain amplitude", "terrain disabled")]
 
-    task = config.task
-    transition_s = task.stance_transition_width / max(task.gait_frequency, 1e-6)
-    # Measured on the generated field: stride-to-stride change at p95 is ~0.44 of the
-    # peak-to-peak relief over a 0.30 m stride, and the swing apex implies a ~0.40 m/s
-    # descent at touchdown.
-    dz_p95 = 0.44 * t.amplitude_p2p
-    timing_err = dz_p95 / 0.40
-    ratio = timing_err / transition_s
-    if ratio > 1.0:
-        return [Finding(
-            Severity.CONTRADICTION, "terrain amplitude",
-            f"relief {t.amplitude_p2p*100:.2f} cm gives a touchdown timing error of "
-            f"{timing_err*1000:.0f} ms against a stance transition of "
-            f"{transition_s*1000:.0f} ms ({ratio:.2f}x). Past 1.0x the terrain rather than "
-            f"the policy is what loses gait_phase, which is 27.8% of the reward.",
-            remedy=f"Lower terrain.amplitude_p2p below "
-                   f"{0.40 * transition_s / 0.44 * 100:.1f} cm, or widen "
-                   f"task.stance_transition_width.",
-        )]
-    if ratio < 0.15:
+    p2p = t.amplitude_p2p
+    if p2p > 0.20:
         return [Finding(
             Severity.SUSPECT, "terrain amplitude",
-            f"relief {t.amplitude_p2p*100:.2f} cm is only {ratio:.2f}x the gait clock's "
-            f"tolerance. The run may be indistinguishable from flat ground.",
-            remedy="Raise terrain.amplitude_p2p, or accept that this is a control run.",
+            f"relief {p2p*100:.1f} cm is above the 20 cm that has ever been measured on this "
+            f"body. At 20 cm a trained walker already falls 64% zero-shot, so a warm start "
+            f"above that is probably off-distribution -- but this is UNMEASURED, not known "
+            f"to be wrong.",
+            remedy="Measure zero-shot falls at this relief before spending a run on it.",
+        )]
+    if p2p < 0.08:
+        return [Finding(
+            Severity.SUSPECT, "terrain amplitude",
+            f"relief {p2p*100:.2f} cm is mild: a trained walker takes only ~6% zero-shot falls "
+            f"at 5.25 cm, so there may be nothing to learn and the run can return NO EFFECT "
+            f"while being reported as terrain training.",
+            remedy="Raise terrain.amplitude_p2p toward 0.14, where zero-shot falls are 36% and "
+                   "64% of episodes still survive, or accept this as a control run.",
+            caught_before="The first terrain run was configured at 5.25 cm on an argument "
+                          "about the gait clock that measurement later refuted.",
         )]
     return [Finding(Severity.OK, "terrain amplitude",
-                    f"{t.amplitude_p2p*100:.2f} cm p2p = {timing_err*1000:.0f} ms touchdown "
-                    f"error, {ratio:.2f}x the {transition_s*1000:.0f} ms stance transition")]
+                    f"{p2p*100:.1f} cm p2p, inside the measured 8-20 cm band")]
 
 
 @check

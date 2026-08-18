@@ -390,19 +390,36 @@ terrain:
   # against 40. Off the field there is NO GEOM and the humanoid falls into the void, which
   # would be recorded as an ordinary fall -- hence an Oracle invariant, not a comment.
   half_extent: 40.0
-  # Peak-to-peak relief. Pinned against the gait clock's own tolerance rather than picked:
-  # the stance transition is 0.07 cycles = 78 ms at 0.9 Hz, and stride-to-stride ground
-  # change at p95 converts to a touchdown timing error of
-  #   1.75 cm -> 20.0 ms (0.26x)   3.50 cm -> 38.9 ms (0.50x)
-  #   5.25 cm -> 60.5 ms (0.78x)   7.00 cm -> 77.8 ms (1.00x, the CEILING)
-  # Past the ceiling the terrain rather than the policy is what loses gait_phase, which is
-  # 27.8% of the reward budget, and the run would be measuring the ground. This takes 0.75
-  # of the ceiling. Measured open-loop PD hold: 41/48 on flat, 11/48 here -- a 3.7x
-  # reduction in passive stability, which is what "rough" is supposed to mean.
-  # Run 2 goes to 7.00 cm with this run as its control; that is the ladder, and it runs
-  # ACROSS runs rather than as an in-run curriculum, because episodes travel further than
-  # any spatial difficulty band this field can afford to carry.
-  amplitude_p2p: 0.0525
+  # Peak-to-peak relief. 14 cm, NOT the 5.25 cm this file was launched with once.
+  #
+  # THE 5.25 FIGURE CAME FROM AN ARGUMENT THAT MEASUREMENT REFUTED. The claim was that past
+  # ~7 cm the terrain rather than the policy loses `gait_phase` (27.8% of the reward budget),
+  # so 5.25 took 0.75 of that "ceiling". Measured on E54's walker, deterministic, held
+  # 1.0 m/s, 64 envs x 400 steps -- gait_phase reward per step against peak-to-peak relief:
+  #
+  #    0.00 cm -> 0.8054      9.00 cm -> 0.7802      20.00 cm -> 0.6957
+  #    5.25 cm -> 0.7967     14.00 cm -> 0.7242
+  #
+  # At 20 cm, FOUR TIMES the supposed ceiling, gait_phase falls 13.6%. The clock is not taken
+  # away, and torso_upright barely moves either (0.527 -> 0.515). What rough ground actually
+  # costs is SPEED: lin_vel goes 0.584 -> 0.299, a 49% loss at 20 cm. The ceiling argument
+  # predicted the wrong quantity would break, so it cannot be used to pick the number.
+  #
+  # The number is picked from zero-shot difficulty instead -- what E54's walker does on each
+  # field with no training at all:
+  #
+  #    p2p       falls     steps survived of 600
+  #    0.00 cm    0.0%      600      flat, the control
+  #    5.25 cm    6.2%      591      the policy already solves 94% of it: little to learn
+  #    9.00 cm    9.4%      573
+  #   14.00 cm   35.9%      523      hard, and 64% of episodes still survive
+  #   20.00 cm   64.1%      427      the warm start is starting to be off-distribution
+  #
+  # 14 cm is where there is real work to do while the warm start is still on-distribution.
+  # At 5.25 the run would most likely have returned NO EFFECT and I would have called the
+  # terrain "solved". Credit where due: the user said it did not look rough, which is what
+  # sent me to measure an argument I had been treating as settled.
+  amplitude_p2p: 0.14
   correlation_short: 0.35   # the measured stride, so the ground changes between footfalls
   correlation_long: 1.20
   long_weight: 0.25
