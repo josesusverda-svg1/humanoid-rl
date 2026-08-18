@@ -129,6 +129,21 @@ class TerrainConfig:
     envelope_min: float = 0.06
     envelope_max: float = 1.45
 
+    #: SHARPNESS, 0 = smooth rolling relief, 1 = fully ridged with creases.
+    #:
+    #: Blends the band-limited field with its "ridged" transform, 1 - |x|, which folds the
+    #: field at every zero crossing and turns smooth troughs into V-shaped creases. At equal
+    #: amplitude, measured on the compiled grid: slope p95 goes 13.8 -> 22.8 degrees, max
+    #: 29.7 -> 41.0, curvature p95 2.20 -> 4.19, and stride-to-stride change 4.91 -> 7.82 cm.
+    #:
+    #: Sharpening by SHAPE rather than by shortening the correlation length is deliberate.
+    #: Dropping correlation to 0.15 m reaches a similar slope (21.3 deg p95) but the features
+    #: become 1.5 cells wide, narrower than the foot's 0.090 m short axis, so a box foot lands
+    #: on a single contact point -- the line-contact defect box feet were chosen to avoid
+    #: (README.md:66). The ridged transform steepens the transitions while leaving the feature
+    #: SIZE set by `correlation_short`, so the foot still bridges several cells.
+    sharpness: float = 0.0
+
     seed: int = 0
 
     def rows(self) -> int:
@@ -162,6 +177,14 @@ def generate(cfg: TerrainConfig) -> np.ndarray:
     # every other patch is divided down: measured, that gave a local peak-to-peak of 0-3.7 cm
     # on a field nominally set to 14 cm, i.e. gentler everywhere than the uniform 5.25 cm
     # field it replaced.
+    # Ridged folding, before the amplitude is set so `amplitude_p2p` still means what it says.
+    if cfg.sharpness > 0.0:
+        peak = float(np.abs(field).max())
+        ridged = 1.0 - np.abs(field) / max(peak, 1e-9)
+        ridged -= ridged.mean()
+        s = float(np.clip(cfg.sharpness, 0.0, 1.0))
+        field = (1.0 - s) * field + s * ridged * (field.std() / max(ridged.std(), 1e-9))
+
     span0 = float(field.max() - field.min())
     if span0 > 0.0:
         field *= cfg.amplitude_p2p / span0

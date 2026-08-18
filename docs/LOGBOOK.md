@@ -136,6 +136,65 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- supersed
 
 Newest first. `E##  date  what changed`.
 
+### E59  2026-08-18  Sharpened the relief, and stopped a threshold from being chased
+
+**"Make the roughness more sharp."** The field was band-limited and box-smoothed, so it was
+rolling waves rather than broken ground. Sharpness is now a parameter: the field is blended
+with its ridged transform `1 - |x|`, which folds it at every zero crossing and turns smooth
+troughs into creases.
+
+At EQUAL amplitude, so only the shape differs, measured on the compiled grid:
+
+| | slope p50 | slope p95 | slope max | curvature p95 | stride change p95 | zero-shot falls |
+|---|---|---|---|---|---|---|
+| smooth | 6.7 deg | 13.8 | 29.7 | 2.20 | 4.91 cm | 35.4% |
+| **ridged** | 10.6 | **24.6** | **50.9** | 4.19 | 7.82 cm | **49.0%** |
+
+**Sharpened by SHAPE, not by shortening the correlation length**, and that choice is
+load-bearing. Dropping `correlation_short` to 0.15 m reaches a similar slope (21.3 deg p95)
+but makes the features 1.5 cells wide -- narrower than the foot's 0.090 m short axis -- so a
+box foot lands on a single contact point, which is the line-contact defect box feet exist to
+avoid (README.md:66). Measured in a rollout, the ridged transform did the opposite: contacts
+per foot went **2.8 -> 3.2**, because it steepens transitions while leaving feature SIZE to
+the correlation length.
+
+**THE PART WORTH KEEPING IS ABOUT THE CHECK, NOT THE TERRAIN.** The preflight bounded the
+roughest patch at 8 cm, justified by the roughest homogeneous field ever measured (6.19 cm at
+64.1% zero-shot falls). The first ridged field failed it. I raised the bound to 12 cm citing a
+new measurement -- 9.32 cm p95 at 49.0% zero-shot falls, i.e. genuinely EASIER than the 6.19 cm
+smooth field. Then it failed again at 12.62 cm, and my next instinct was to raise it again.
+
+**That is the behaviour I criticised in E57 four hours earlier**, in this file: *"a check that
+gets loosened whenever it blocks something is a rubber stamp."* Raising it once on new evidence
+was defensible. Raising it twice would have meant the threshold was tracking my intent rather
+than the world.
+
+The correct reading of a bound that must move twice is that **it is measuring the wrong
+quantity**. Stride-to-stride change is not comparable across sharpness: folding the field
+raises local height differences much faster than it raises difficulty, which is why 9.32 cm
+ridged is easier than 6.19 cm smooth. So the structural bound was deleted, not widened, and
+the gate is now the quantity that actually matters -- **zero-shot fall rate, measured directly**
+by `preflight_terrain.py --policy <checkpoint>`, a 400-step deterministic rollout costing
+about thirty seconds. It fails above 60%, where a warm start stops adapting and starts
+retraining. Without `--policy` the script now says the difficulty gate was SKIPPED rather than
+substituting a proxy for it.
+
+**The final field**, all preflight checks passing including the measured one:
+
+| | |
+|---|---|
+| flattest 5% of patches | 1.12 cm per 0.30 m step |
+| roughest 5% | 9.32 cm |
+| flat-to-rough ratio | **8.3x** |
+| slope p95 / max | 24.6 deg / 50.9 deg |
+| ground_z spread across spawns | 17.5 cm |
+| **zero-shot falls (the gate)** | **49.0%**, against 1.6% flat |
+
+E58's predictions carry over with the primary bar restated against 49.0%: **deterministic
+falls on rough <= 20%** at a held 1.0 m/s command. *Reachable*: the same policy takes 1.6% on
+flat and the run must cut 49% by roughly three fifths, which is less than the two-thirds cut
+E57 asked for on an easier field.
+
 ### E58  2026-08-18  The field was uniform. It is now heterogeneous, after two failed attempts
 
 **"So it'll be very rough at some area, then it will be kind of flat another area. So every

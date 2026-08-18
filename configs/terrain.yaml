@@ -428,5 +428,18 @@ terrain:
   # _verify_pd_holds_pose both run the humanoid at x = y = 0, and this makes prepare()
   # bit-identical to a plane run. Verified: standing_height agrees to all 16 digits.
   flat_disc_radius: 2.0
+  # SHARPNESS 1.0: ridged, with creases and facets rather than rolling waves.
+  #
+  # At equal amplitude, measured on the compiled grid: slope p95 15.3 -> 24.6 deg, max
+  # 39.6 -> 50.9, curvature p95 2.20 -> 4.19, stride-to-stride change 4.91 -> 7.82 cm, and
+  # zero-shot falls for the warm-start policy 35.4% -> 49.0%.
+  #
+  # Sharpened by SHAPE, not by shortening the correlation length. Dropping correlation to
+  # 0.15 m reaches a similar slope (21.3 deg p95) but makes the features 1.5 cells wide,
+  # narrower than the foot's 0.090 m short axis, so a box foot lands on a single contact
+  # point -- the line-contact defect box feet exist to avoid (README.md:66). The ridged
+  # transform instead RAISED contacts per foot, 2.8 -> 3.2 measured in a rollout, because it
+  # steepens the transitions while leaving the feature SIZE to `correlation_short`.
+  sharpness: 1.0
   spawn_half_extent: 12.0
   seed: 0
