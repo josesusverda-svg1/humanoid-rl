@@ -128,7 +128,7 @@ ppo:
   # 72.8% at horizon 24. Pre-registered as the named residual if prediction 7 fails.
   gae_lambda: 0.95
 
-  learning_rate: 1.0e-3
+  learning_rate: 1.0e-5
   num_epochs: 5
   # 245,760 / 10 = 24,576, identical to the minibatch every locomotion run to date used
   # (4096 x 24 / 4). Leaving this at 4 alongside horizon 60 would silently make the
@@ -185,7 +185,13 @@ ppo:
 
   # The learning rate is driven by measured KL divergence rather than a fixed schedule,
   # which is far more robust across changing reward scales.
-  # 30 critic-only updates before the actor moves. REQUIRED here, and it was absent.
+  # 0, NOT 30. Measured in E56's four-arm experiment: the warmup neither causes nor prevents
+  # the warm-start blow-up, it only moves it from iteration 1 to iteration 31 and lands it 1.4x
+  # harder. C (no warmup, lr 1e-5) beat D (warmup 30, lr 1e-5) on episode length, 1880 vs 1765,
+  # with one fewer moving part.
+  #
+  # The ORIGINAL note is kept below because it is the reasoning that was wrong, and this file
+  # is the place a reader looks for why:
   # --init-from loads POLICY WEIGHTS ONLY with a fresh optimiser (train.py:876), so the value
   # function arrives untrained against a world that just changed under it. E38 measured the
   # failure this prevents: approx_kl 24.45 at iteration 1 on a warm start, which slams the
@@ -193,7 +199,7 @@ ppo:
   # strictly worse than E38's case, because the reward is unchanged but the STATE
   # DISTRIBUTION is not -- the critic's predictions are stale for a reason it cannot see.
   # ppo.py:429 also holds the LR controller off until warmup finishes, so the two interact.
-  critic_warmup_updates: 30
+  critic_warmup_updates: 0
   adaptive_lr: true
   desired_kl: 0.01
   lr_min: 1.0e-5

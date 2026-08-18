@@ -136,7 +136,15 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- supersed
 
 Newest first. `E##  date  what changed`.
 
-### E56  2026-08-18  E55 KILLED at iteration 45. `critic_warmup_updates` CAUSED the failure it exists to prevent
+### E56  2026-08-18  E55 KILLED at iteration 45. The learning rate, not the warmup
+
+> **CORRECTED an hour after writing, by the four-arm experiment appended at the end.** The
+> original title and thesis of this entry were *"`critic_warmup_updates` CAUSED the failure it
+> exists to prevent"*. That is **wrong**. The warmup neither caused nor cured it: it moved the
+> death from iteration 1 to iteration 31 and made it 1.4x worse. The cause is starting a
+> **good** policy at `learning_rate: 1.0e-3`. The mechanism paragraphs below are accurate as
+> far as they go; the attribution was not, and I wrote it from one arm.
+
 
 **K2 fired within four minutes of launch and the run was stopped, as pre-registered.** `approx_kl` reached **300.97**, against K2's threshold of 1.0 and against the 24.45 that E38 recorded as the warm-start disaster this very setting was added to fix.
 
@@ -177,6 +185,44 @@ The general form, and it is the same shape as E52's check and E51's bars: **a re
 **What is NOT damaged.** The source policy `runs/final-s1-20260817-112115/checkpoints/best.pt` is untouched; the terrain run wrote no `best.pt` at all (eval interval 100, died at 45). The terrain itself is not implicated: the field, the spawn rule, the world-z fixes and the dual eval all behaved, and the zero-shot measurement that a warm policy takes 7.8% falls on this ground still stands.
 
 **Not relaunched.** K4 forbids a reflex re-tune, and the obvious fix (start at `lr_min` and let the measured-KL controller climb) is a hypothesis about a 15-hour run that costs about two minutes to test. Tested first, then launched.
+
+
+**THE FOUR-ARM EXPERIMENT, run before relaunching anything.** Warm-started from E54's walker
+in every arm; only the two named settings differ. Healthy means episode length STAYS high.
+
+| arm | learning_rate | critic_warmup | max approx_kl | final ep length | |
+|---|---|---|---|---|---|
+| A | 1.0e-3 | 30 | **300.97** at iter 31 | 138 | destroyed |
+| B | 1.0e-3 | 0 | **207.98** at iter 1 | 131 | destroyed |
+| C | **1.0e-5** | 0 | **0.0204** | **1880** | healthy |
+| D | 1.0e-5 | 30 | 0.0103 | 1765 | healthy |
+
+**A and B are the same failure at different times.** The warmup does not cause it and does not
+prevent it; it defers the actor's first move to iteration 31 and lets it land 1.4x harder,
+because thirty extra critic updates sharpen the advantages the actor then steps on.
+**C and D are both healthy**, so the warmup is not the cure either. The single variable that
+decides the outcome is the learning rate.
+
+This retires the explanation in the corrected header above, and it also puts a question mark
+over E38, which diagnosed its own approx_kl 24.45 as a critic-staleness problem and prescribed
+`critic_warmup_updates` for it. On this evidence that was very likely an unadapted-learning-rate
+problem too, and the remedy that has been carried forward since is treating a symptom. **Not
+claimed as settled**: E38's run cannot be re-measured from here, and one experiment on a
+different task is not a retraction of another entry's verdict.
+
+**The fix, and why it is one change rather than two.** `learning_rate: 1.0e-5` -- which is
+`lr_min`, the floor the adaptive controller is already allowed to use -- and `critic_warmup_updates`
+back to 0. C beats D on episode length (1880 vs 1765) with one fewer moving part, and E20's rule
+is one change per run. The controller then climbs on measured KL, reaching 7.59e-05 by iteration
+40 in arm C, which is what `adaptive_lr` exists to do and what a hand-set 1.0e-3 was preventing
+it from doing.
+
+**The general lesson, which is the fourth of its kind this week.** A learning rate is not a
+property of the optimiser alone. It is a property of the optimiser **and the policy it starts
+from**: the same 1.0e-3 gives approx_kl 0.0855 from a random policy and 207.98 from a trained
+one, a 2,400x difference, because a good policy has large coherent advantages where a random
+one has small incoherent ones. `configs/*.yaml` has no way to express "this rate is for cold
+starts", and every warm start in this project has inherited a number chosen for a cold one.
 
 ### E55  2026-08-18  PRE-REGISTERED BEFORE LAUNCH: rough ground, warm-started
 
