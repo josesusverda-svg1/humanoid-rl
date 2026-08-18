@@ -119,6 +119,77 @@ AMP readiness: NOT ready. Passes "stays up", fails "obeys speed".  **<- supersed
 
 Newest first. `E##  date  what changed`.
 
+### E52  2026-08-17  The reward FORBIDS a human stance, and the check written to catch that looked at the wrong end
+
+**Measured, not argued.** `feet_distance` is a corridor `[feet_distance_min 0.20,
+feet_distance_max 0.45]` at weight -3.0. Human walking stance is 0.10-0.15 m, and
+`gait_score.py:74` scores **0.00** for anything at or above 0.20. The corridor and the target
+do not overlap:
+
+| stance | reward/step | gait_score band |
+|---|---|---|
+| 0.125 (human mid) | **-0.225** | **1.00** |
+| 0.150 | -0.150 | 1.00 |
+| 0.200 | 0.000 | 0.00 |
+| 0.330 | **0.000** | **0.00** |
+| 0.420 | 0.000 | 0.00 |
+| 0.670 | -0.660 | 0.00 |
+
+To score 1.00 on this project's own human-likeness band the policy must pay **0.225/step,
+6.4% of its ~3.5/step positive budget, forever**. Sitting at 0.33 costs exactly nothing. The
+policy is not failing to learn a narrow stance; it is correctly declining to buy one.
+
+This is the E33 class inverted. E33 found a success predicate that was **unsatisfiable** by
+construction. This is a target that is **actively penalised** by construction.
+
+**How it hid, and this is the part worth keeping.** The config carries a pre-registered check,
+written when `feet_distance_max` was added:
+
+> *"If the eval's `stance_width` still sits above 0.45 after this run, the term is still too
+> weak and that is the measurement that says so."*
+
+Measured: **0.331** in eval, 0.386-0.42 at a held 1.0 m/s command. The condition did not
+trigger. Read naively that is a pass -- the term pulled the stance down from the 0.67 brace
+of E12, so it worked. What actually happened is that the policy moved **inside** the corridor
+and the term stopped firing at all: `reward/feet_distance` reads **-0.032** and **-0.019** on
+the two live runs, i.e. essentially zero. The prediction was written against the corridor's
+UPPER edge while the defect lives at its LOWER one.
+
+Third time in three days that one of my own pre-registrations checked the wrong quantity
+(E51 had two: mean speed against a capability threshold). The pattern is specific enough to
+name: **a bar written against the failure mode you just fixed will not see the failure mode
+you created.**
+
+**Is the splay load-bearing?** E23's precedent says measure the counterfactual before touching
+a reward, so `scripts/stance_counterfactual.py` asks three separate questions of the trained
+policy, no training and no reward change:
+
+| question | result |
+|---|---|
+| does it ever narrow on its own? | **yes** -- 1st percentile 0.145 m, 0% falls |
+| does it survive starting narrow? | **yes** -- hips adducted 0.30 rad: 6% falls vs 0% baseline |
+| does it return to wide? | **yes** -- 0.327 -> 0.394 over 400 steps, drift +0.066 m |
+
+So the splay is a **preference, not a necessity**: nothing but the reward is pulling it there,
+and the reward pays exactly zero for it.
+
+**What this does NOT establish, stated because the temptation is to overclaim.** The
+intervention is weak -- the policy escapes the adducted start within ~50 control steps, and
+mean stance falls only 0.386 -> 0.336 at the strongest setting. So what was tested is survival
+of a TRANSIENT narrowing, not sustained walking at 0.125 m. **Whether a human-width stance is
+sustainable at speed on this body is unmeasured.** A run that assumes it is, is assuming
+something this project has not shown.
+
+**Also measured**: unperturbed at a held 1.0 m/s the stance is **0.386**, against 0.331 in
+eval. Eval averages over the command distribution; at a held command the policy drifts toward
+the corridor's ceiling. The term is not merely silent -- the policy is pressing against the
+top of what it is allowed.
+
+**Not changed yet, deliberately.** Lowering `feet_distance_min` is a REWARD change, and every
+reward change in this project has produced an exploit or NO EFFECT while both clean WORKED
+verdicts were optimiser changes. It goes with a pre-registration and a kill criterion on falls,
+after the exploit surface has been red-teamed -- not as "fix the number".
+
 ### E51  2026-08-17  E50 VERDICT: **MIXED**. The exam is passed; three of my bars were unreachable by construction
 
 **Run**: `runs/final-s0-20260816-201017`, 11,393 iterations, 2.80 B env steps, 15.2 h. Ran its
